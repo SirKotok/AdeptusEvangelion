@@ -5,18 +5,18 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class AttackProfile implements Serializable {
-    int Dice;
-    int Dicepower;
-    int Power;
-    int Stamina;
-    int AmmoCost = 0;
-    int Penetration = 0;
-    int AreaType = -1;
+    public int Dice;
+    public int Dicepower;
+    public int Power;
+    public int Stamina;
+    public int AmmoCost = 0;
+    public int Penetration = 0;
+    public int AreaType = -1;
      // Area = -2 -> Line
      // Area = -1 -> Normal Attack
      // Area = 0+ -> Area Attack
-    int ATP;
-    String name;
+    public int ATP;
+    public String name;
     public boolean Ranged;
     public boolean isRanged() {
         return Ranged;

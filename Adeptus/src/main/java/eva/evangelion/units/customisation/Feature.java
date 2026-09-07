@@ -1,6 +1,8 @@
 package eva.evangelion.units.customisation;
 
-public class Feature extends Upgrade {
+import java.io.Serializable;
+
+public class Feature extends Upgrade implements Serializable {
 
     public enum FeatureType {
         HISTORY,

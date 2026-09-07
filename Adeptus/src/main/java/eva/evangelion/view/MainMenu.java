@@ -341,7 +341,7 @@ public class MainMenu {
         title.setStyle("-fx-font-size: 20px; -fx-font-weight: bold;");
         BetterButton createBtn = new BetterButton("Create New Weapon");
         createBtn.setSuccessStyle();
-        createBtn.setOnAction(e -> System.out.println("Create Weapon"));
+        createBtn.setOnAction(e -> WeaponCreatorUI.launchStandalone());
         content.getChildren().addAll(title, createBtn);
         container.addNode(content);
         return container;
@@ -397,19 +397,48 @@ public class MainMenu {
         Label title = new Label("Game");
         title.setStyle("-fx-font-size: 20px; -fx-font-weight: bold;");
 
+        // ---- Mode Selection ----
+        ToggleGroup modeGroup = new ToggleGroup();
+        RadioButton createRadio = new RadioButton("Create");
+        createRadio.setToggleGroup(modeGroup);
+        createRadio.setSelected(true);
+        RadioButton connectRadio = new RadioButton("Connect");
+        connectRadio.setToggleGroup(modeGroup);
+
+        HBox modeBox = new HBox(20, createRadio, connectRadio);
+        modeBox.setAlignment(Pos.CENTER_LEFT);
+
+        // ---- Mode-specific input area ----
+        VBox modeSpecificBox = new VBox(10);
+        modeSpecificBox.setAlignment(Pos.CENTER_LEFT);
+
+        // Create mode inputs
         HBox playerCountBox = new HBox(10);
         playerCountBox.setAlignment(Pos.CENTER_LEFT);
         Label playerCountLabel = new Label("Number of Players:");
         Spinner<Integer> playerSpinner = new Spinner<>(1, 13, 1);
         playerCountBox.getChildren().addAll(playerCountLabel, playerSpinner);
 
+        // Connect mode inputs
         HBox nameBox = new HBox(10);
         nameBox.setAlignment(Pos.CENTER_LEFT);
         Label nameLabel = new Label("Player Name:");
         TextField nameField = new TextField("Player1");
         nameBox.getChildren().addAll(nameLabel, nameField);
 
-        // ---- Speed controls ----
+        // Show/hide based on radio selection
+        modeGroup.selectedToggleProperty().addListener((obs, oldToggle, newToggle) -> {
+            modeSpecificBox.getChildren().clear();
+            if (newToggle == createRadio) {
+                modeSpecificBox.getChildren().add(playerCountBox);
+            } else {
+                modeSpecificBox.getChildren().add(nameBox);
+            }
+        });
+        // Initial content
+        modeSpecificBox.getChildren().add(playerCountBox);
+
+        // ---- Speed controls (same as before) ----
         Label speedLabel = new Label("Speed: 1.0x");
         Slider speedSlider = new Slider(0.1, 2.0, 1.0);
         speedSlider.setBlockIncrement(0.1);
@@ -430,25 +459,38 @@ public class MainMenu {
         VBox speedBox = new VBox(5, speedLabel, speedSlider, fastCheck);
         speedBox.setAlignment(Pos.CENTER_LEFT);
 
-        BetterButton newGameBtn = new BetterButton("New Game");
-        newGameBtn.setSuccessStyle();
-        newGameBtn.setOnAction(e -> {
-            String playerName = nameField.getText().trim();
-            if (playerName.isEmpty()) {
-                playerName = "Player";
-            }
+        // ---- Confirm Button ----
+        BetterButton confirmBtn = new BetterButton("Confirm");
+        confirmBtn.setSuccessStyle();
+        confirmBtn.setOnAction(e -> {
             double speed = speedSlider.getValue();
             boolean fast = fastCheck.isSelected();
-            Game.startGame(new Battlefield(50, 50), "DM", speed, fast, playerSpinner.getValue());
+            Battlefield dummyBattlefield = new Battlefield(50, 50);  // will be ignored in connect mode
+
+            if (createRadio.isSelected()) {
+                int playerCount = playerSpinner.getValue();
+                Game.startGame(dummyBattlefield, speed, fast, playerCount, "DM", true);
+            } else { // Connect mode
+                String playerName = nameField.getText().trim();
+                if (playerName.isEmpty()) {
+                    Alert alert = new Alert(Alert.AlertType.WARNING);
+                    alert.setContentText("Player name cannot be empty.");
+                    alert.showAndWait();
+                    return;
+                }
+                // Check if game file exists
+                File gameFile = new File("Active/gamestate.ser");
+                if (!gameFile.exists()) {
+                    Alert alert = new Alert(Alert.AlertType.ERROR);
+                    alert.setContentText("No game file found");
+                    alert.showAndWait();
+                    return;
+                }
+                Game.startGame(dummyBattlefield, speed, fast, 1, playerName, false);
+            }
         });
 
-        BetterButton connectBtn = new BetterButton("Connect to Game");
-        connectBtn.setPrimaryStyle();
-        connectBtn.setOnAction(e -> {
-            System.out.println("Connecting as " + nameField.getText());
-        });
-
-        content.getChildren().addAll(title, playerCountBox, nameBox, speedBox, newGameBtn, connectBtn);
+        content.getChildren().addAll(title, modeBox, modeSpecificBox, speedBox, confirmBtn);
         container.addNode(content);
         return container;
     }

@@ -29,13 +29,7 @@ public class GameState implements Serializable {
         return ActionList.get(ActionList.size() - 1).getActionNumber();
     }
 
-    public Action getNextAction(int currentNumber) {
-        int nextIndex = currentNumber + 1;
-        if (nextIndex < ActionList.size()) {
-            return ActionList.get(nextIndex);
-        }
-        return null;
-    }
+
 
     /**
      * Returns the total number of actions stored.
@@ -50,7 +44,13 @@ public class GameState implements Serializable {
     public List<Action> getActions() {
         return new ArrayList<>(ActionList);
     }
-
+    public Action getActionfromNumber(int number) {
+        List<Action> list = getActions();
+        for (Action act : list) {
+            if (act.getActionNumber() == number) return act;
+        }
+        return null;
+    }
     /**
      * Saves this GameState to the given file using Java serialization.
      *

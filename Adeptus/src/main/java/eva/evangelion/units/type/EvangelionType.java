@@ -14,8 +14,8 @@ public class EvangelionType implements Serializable {
     private String name;
     private String gameClass;
     private List<Upgrade> upgrades; // only Feature upgrades
-    private String primaryColor;    // new
-    private String secondaryColor;  // new
+    private String primaryColor = "#ffffff";    // new
+    private String secondaryColor = "#000000";  // new
 
     public EvangelionType() {
         this.upgrades = new ArrayList<>();

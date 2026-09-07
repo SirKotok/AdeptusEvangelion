@@ -10,6 +10,14 @@ public class Item implements Serializable {
         Name = name;
     }
 
+    public String getName() {
+        return Name;
+    }
+
+    public void setName(String name) {
+        Name = name;
+    }
+
     public boolean isSmall() {
         return small;
     }

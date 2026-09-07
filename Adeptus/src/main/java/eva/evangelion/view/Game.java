@@ -11,14 +11,21 @@ import eva.evangelion.state.actions.Action;
 import eva.evangelion.state.actions.MoveAction;
 import eva.evangelion.state.actions.DMChoosePlayerAction;
 import eva.evangelion.units.battle.Evangelion;
+import eva.evangelion.state.actions.createDMSetUpPopUpAction;
+import eva.evangelion.state.actions.AddPlayerAction;
+import eva.evangelion.state.actions.PLAYERCreateEvangelionAction;
+import eva.evangelion.state.QueuePosition.ReactionType;
+import eva.evangelion.units.type.EvangelionIO;
+import eva.evangelion.units.type.EvangelionType;
 import eva.evangelion.units.battle.FieldUnit;
 import eva.evangelion.units.battle.Unit;
-import eva.evangelion.units.type.EvangelionType;
 import eva.evangelion.view.UIElements.BetterButton;
 import eva.evangelion.util.DirectoryWatcher;
 import javafx.animation.*;
+import javafx.application.Platform;
 import javafx.beans.property.DoubleProperty;
 import javafx.beans.property.SimpleDoubleProperty;
+import javafx.stage.Modality;
 import javafx.util.Duration;
 import eva.evangelion.state.actions.DMCreateUnitAction;
 import eva.evangelion.state.actions.DMDeleteUnitAction;
@@ -61,6 +68,7 @@ public class Game {
     public final VBox inventoryTab;
     public final VBox chatTab;
     public final VBox dmTab;
+    private final VBox weaponCreatorTab;
     private TextArea chatArea;
     private TextArea dmConsoleOutput;
     private final Battlefield battlefield;
@@ -115,13 +123,14 @@ public class Game {
     // ============================================================
     //   CONSTRUCTORS
     // ============================================================
+    private int startingplayernumber;
 
-
-    public Game(Battlefield battlefield, String playerName, double speed, boolean fast, int playernumber) {
+    public Game(Battlefield battlefield, String playerName, double speed, boolean fast, int playernumber, boolean startnew) {
+        System.out.println("STARTING GAME WITH "+playernumber+" PLAYERNUMBER AND STARTNEW = "+startnew);
         this.battlefield = battlefield;
         this.actionSpeed = speed;
         this.fastActions = fast;
-
+        startingplayernumber = playernumber;
         root = new BorderPane();
         centerStack = new StackPane();
 
@@ -130,7 +139,12 @@ public class Game {
         chatTab = buildChatTab();
         dmTab = buildDmTab();
 
-        centerStack.getChildren().addAll(battlefieldTab, inventoryTab, chatTab, dmTab);
+        weaponCreatorTab = new VBox();
+        weaponCreatorTab.setPadding(new Insets(10));
+        WeaponCreatorUI weaponCreatorUI = new WeaponCreatorUI();
+        weaponCreatorTab.getChildren().add(weaponCreatorUI);
+
+        centerStack.getChildren().addAll(battlefieldTab, inventoryTab, chatTab, dmTab, weaponCreatorTab);
         showTab(battlefieldTab);
         root.setCenter(centerStack);
         root.setBottom(buildButtonBar());
@@ -151,9 +165,12 @@ public class Game {
         updateCurrentPlayerLabel();
         updateActivePlayerDisplay();
         updateTopBarColor();
-        initializeGameplay();
 
+
+        initializeGameplay(startnew);
         initializeUnits(playernumber);
+
+
         setupBoardInteraction();
         updateNamePanels();
 
@@ -177,8 +194,11 @@ public class Game {
             }
         }
         DirectoryWatcher watcher = new DirectoryWatcher(dir, GAME_STATE_FILE, () -> {
-            LogMessage("GameState file changed, reloading...");
-            reloadGameState();
+            // Run reload on the JavaFX thread to avoid concurrent modification
+            Platform.runLater(() -> {
+                LogMessage("GameState file changed, reloading...");
+                reloadGameState();
+            });
         });
         Thread watcherThread = new Thread(watcher);
         watcherThread.setDaemon(true);
@@ -200,6 +220,12 @@ public class Game {
         if (!Files.exists(file)) return;
         try {
             GameState newState = GameState.loadFromFile(file);
+            if (startingplayernumber == -1) {
+                startingplayernumber++;
+               for (Action act : newState.getActions()) {
+                   if (act instanceof createDMSetUpPopUpAction) startingplayernumber++;
+               }
+            }
             if (newState != null) {
                 processNewState(newState);
             }
@@ -225,11 +251,13 @@ public class Game {
             for (int i = currentActionNumber; i < newCount && i < actions.size(); i++) {
                 pendingActions.add(actions.get(i));
             }
-            currentActionNumber = newCount;
+            LogMessage("Current Action Number is "+currentActionNumber);
             LogMessage("Added " + (newCount - currentActionNumber) + " new actions to processing queue.");
+            currentActionNumber = newCount;
+            LogMessage("Current Action Number now = " + currentActionNumber);
         }
         this.gamestate = state;
-
+        System.out.println("gamestate set to new state");
         if (!isProcessing && !pendingActions.isEmpty()) {
             startProcessing();
         }
@@ -242,14 +270,24 @@ public class Game {
     private void startProcessing() {
         if (isProcessing || pendingActions.isEmpty()) return;
         isProcessing = true;
+
         if (fastActions) {
-            for (Action action : pendingActions) {
+            List<Action> actionsCopy;
+            synchronized (pendingActions) {   // optional, but safe
+                actionsCopy = new ArrayList<>(pendingActions);
+                pendingActions.clear();
+            }
+            for (Action action : actionsCopy) {
                 processAction(action);
                 LogMessage("Processed action (fast): " + action);
             }
-            pendingActions.clear();
             isProcessing = false;
             LogMessage("Finished fast processing of all actions.");
+            // If more actions were added during processing, start another cycle
+            if (!pendingActions.isEmpty()) {
+                startProcessing();
+            }
+            checkShowPopUp();
             return;
         }
 
@@ -264,6 +302,7 @@ public class Game {
                 processAction(action);
                 LogMessage("Processed action: " + action);
             });
+
             processingTimeline.getKeyFrames().add(kf);
         }
 
@@ -271,6 +310,7 @@ public class Game {
             pendingActions.clear();
             isProcessing = false;
             processingTimeline = null;
+            checkShowPopUp();
             LogMessage("Finished processing all actions.");
             if (!pendingActions.isEmpty()) {
                 startProcessing();
@@ -279,6 +319,7 @@ public class Game {
 
         processingTimeline.play();
         LogMessage("Started sequential processing of " + pendingActions.size() + " actions.");
+
     }
 
     // ---- processAction: handles both MoveAction and DMChoosePlayerAction ----
@@ -293,17 +334,26 @@ public class Game {
             processDMCreateUnitAction((DMCreateUnitAction) action);
         } else if (action instanceof DMDeleteUnitAction) {
             processDMDeleteUnitAction((DMDeleteUnitAction) action);
+        }  else if (action instanceof createDMSetUpPopUpAction) {
+            processCreateDMSetUp((createDMSetUpPopUpAction) action);
+        } else if (action instanceof AddPlayerAction) {
+            processAddInitialPlayerAction((AddPlayerAction) action);
+        } else if (action instanceof PLAYERCreateEvangelionAction) {
+            processPLAYERCreateEvangelion((PLAYERCreateEvangelionAction) action);
         } else {
             LogMessage("Unknown action type: " + action.getClass().getSimpleName());
         }
+        LogMessage(outputQueue());
+        LogMessage(outputActions());
         QueuePosition next = queue.currentPosition();
         if (next != null) {
-            LogMessage("Setting active player to "+next.getUnitID()+" at process action end, current position in queue is "+queue.getQueue().indexOf(next));
+            LogMessage("Setting active player to "+next.getUnitID()+" at process action end, current position in queue is "
+                    +queue.getQueue().indexOf(next));
             setActivePlayer(next.getUnitID());
         }
     }
 
-    // ---- Move action execution ----
+
     private void processMoveAction(MoveAction movement) {
         FieldUnit actor = getUnitFromName(movement.getActor());
         if (actor == null || !actor.isExists()) {
@@ -349,7 +399,7 @@ public class Game {
         QueuePosition nextPos = new QueuePosition(action.getActor(), false);
         LogMessage("Adding queue position for " + nextPos.getUnitID()+ " at movement");
         nextPos.setActionNumber(-1);
-        queue.addPosition(nextPos, 0);
+        queue.addPosition(nextPos, 1);
     }
     protected void activateQueue(Action action){
         QueuePosition current = queue.currentPosition();
@@ -358,26 +408,38 @@ public class Game {
             LogMessage("Set current position (" + current.getUnitID() + ") action number to " + action.getActionNumber());
         }
     }
-    protected void DMQueueInsertion (Action action) {
-        setNextTurnToThis();
+
+    protected void DMQueueInsertion (Action action, String NAME) {
+        addTurnHere(action);
         QueuePosition current = queue.currentPosition();
         current.setActionNumber(action.getActionNumber());
         LogMessage("Set current position (" + current.getUnitID() + ") action number to " + action.getActionNumber());
-        current.setUnitID("DM_INSERTION");
+        current.setUnitID(NAME);
         LogMessage("Renamed ID to "+current.getUnitID()+" at action "+action);
     }
+    protected void addTurnHere(Action action){
+        QueuePosition newPos = new QueuePosition(action.getActor(), false);
+        LogMessage("Add Basic Turn for "+newPos.getUnitID());
+        queue.addPosition(newPos, 0);
+    }
+
     protected void setNextTurnToThis(){
-        LogMessage("Add next turn equal to this");
         QueuePosition next = new QueuePosition(queue.currentPosition().getUnitID(), queue.currentPosition().Reaction);
+        if (queue.currentPosition().Reaction) {
+            next.setReactionType(queue.currentPosition().getReactionType());
+            next.setSkippable(queue.currentPosition().isSkippable());
+            next.setDescription(queue.currentPosition().getDescription());
+        }
+        LogMessage("Add next turn equal to this: "+next.getUnitID()+" reaction = "+next.Reaction);
         next.setActionNumber(-1);
-        queue.addPosition(next, 0);
+        queue.addPosition(next, 1);
     }
 
     // ---- DMChoosePlayerAction execution ----
 
     private void processDMCreateUnitAction(DMCreateUnitAction action) {
 
-        DMQueueInsertion(action);
+        DMQueueInsertion(action, "DM_CREATE_UNIT_INSERT");
 
         String name = action.getUnitName();
         int x = action.getX();
@@ -402,7 +464,7 @@ public class Game {
     }
 
     private void processDMDeleteUnitAction(DMDeleteUnitAction action) {
-        DMQueueInsertion(action);
+        DMQueueInsertion(action, "DM_DELETE_UNIT_INSERT");
 
         int x = action.getX();
         int y = action.getY();
@@ -432,20 +494,148 @@ public class Game {
             QueuePosition nextPos = new QueuePosition(chosen, false);
             nextPos.setActionNumber(-1);
             LogMessage("Adding queue position for " + nextPos.getUnitID() + " at DMPlayerAction");
-            queue.addPosition(nextPos, 0);
+            queue.addPosition(nextPos, 1);
         } else {
             LogMessage("DMChoosePlayerAction failed: No current queue position.");
         }
     }
+
+
+    private String outputQueue(){
+        StringBuilder queueOutput = new StringBuilder("Queue positions (in order):\n");
+        List<QueuePosition> positions = queue.getQueue(); // getQueue() returns a list
+        for (int i = 0; i < positions.size(); i++) {
+            QueuePosition pos = positions.get(i);
+            queueOutput.append("  Position ").append(i)
+                    .append(": UnitID=").append(pos.getUnitID())
+                    .append(", ActionNumber=").append(pos.getActionNumber())
+                    .append(", Reaction=").append(pos.isReaction());
+            if (pos.getReactionType() != null) {
+                queueOutput.append(", ReactionType=").append(pos.getReactionType().toString())
+                        .append(", skippable=").append(pos.isSkippable());
+            }
+            queueOutput.append("\n");
+        }
+        return queueOutput.toString();
+    }
+
+
+
+    private String outputActions(){
+        List<Action> allActions = gamestate.getActions();
+        if (allActions.isEmpty()) {
+            return "Action List is Empty";
+        } else {
+            StringBuilder sb = new StringBuilder("All actions in GameState:\n");
+            for (int i = 0; i < allActions.size(); i++) {
+                Action a = allActions.get(i);
+                sb.append("  ").append(i).append(": ActionNumber=").append(a.getActionNumber())
+                        .append(", Type=").append(a.getClass().getSimpleName());
+
+                if (a instanceof MoveAction) {
+                    MoveAction ma = (MoveAction) a;
+                    sb.append(", actor=").append(ma.getActor())
+                            .append(", delta=(").append(ma.getDeltaX()).append(",").append(ma.getDeltaY()).append(")");
+                } else if (a instanceof DMChoosePlayerAction) {
+                    DMChoosePlayerAction da = (DMChoosePlayerAction) a;
+                    sb.append(", actor=").append(da.getActor())
+                            .append(", chosenPlayer=").append(da.getChosenPlayer());
+                } else if (a instanceof DMCreateUnitAction) {
+                    DMCreateUnitAction ca = (DMCreateUnitAction) a;
+                    sb.append(", actor=").append(ca.getActor())
+                            .append(", name=").append(ca.getUnitName())
+                            .append(", x=").append(ca.getX())
+                            .append(", y=").append(ca.getY());
+                } else if (a instanceof DMDeleteUnitAction) {
+                    DMDeleteUnitAction da = (DMDeleteUnitAction) a;
+                    sb.append(", actor=").append(da.getActor())
+                            .append(", x=").append(da.getX())
+                            .append(", y=").append(da.getY());
+                }
+                sb.append("\n");
+            }
+            return sb.toString();
+    }
+    }
+
+    private void processCreateDMSetUp(createDMSetUpPopUpAction action) {
+        DMQueueInsertion(action, "START");
+        QueuePosition reaction = QueuePosition.createReactionTurn(
+                "DM",
+                ReactionType.DM_SETUP_PLAYER,
+                "Setup player", action.getActionNumber()
+        );
+        reaction.setSkippable(false);
+        LogMessage("ADDING SETUP, current queue = "+outputQueue());
+        queue.addPosition(reaction, 0);
+        LogMessage("ADDED SETUP, new queue = "+outputQueue());
+
+    }
+
+    private void processAddInitialPlayerAction(AddPlayerAction action) {
+        LogMessage("Processing AddPlayer");
+        QueuePosition current = getCurrentPosition();
+        LogMessage("current position is at "+queue.getNUMPOSof(current));
+        if (current != null && current.Reaction && current.getReactionType() == ReactionType.DM_SETUP_PLAYER) {
+            current.setActionNumber(action.getActionNumber());
+        } else {
+            LogMessage("Warning: INITIALCreateUnitRequestAction processed but current position is not DM_SETUP_PLAYER reaction.");
+        }
+
+        String playerName = action.getUnitName();
+        QueuePosition playerReaction = QueuePosition.createReactionTurn(
+                playerName,
+                ReactionType.PLAYER_SETUP,
+                "Chose your evangelion out of created options", action.getActionNumber()
+        );
+        playerReaction.setSkippable(false);
+        LogMessage("current starting players = "+startingplayernumber);
+        queue.addPosition(playerReaction,startingplayernumber-1);
+        LogMessage("Added PLAYER_SETUP reaction turn for " + playerName+" at position "+queue.getNUMPOSof(playerReaction));
+    }
+
+    private void processPLAYERCreateEvangelion(PLAYERCreateEvangelionAction action) {
+        // This action is sent by the player from the PLAYER_SETUP pop-up.
+        // The current position should be the player's reaction turn.
+        QueuePosition current = getCurrentPosition();
+        if (current != null && current.Reaction && current.getReactionType() == ReactionType.PLAYER_SETUP) {
+            current.setActionNumber(action.getActionNumber());
+        } else {
+            LogMessage("Warning: PLAYERCreateEvangelionAction processed but current position is not PLAYER_SETUP reaction.");
+        }
+
+
+        // Create the unit on the battlefield
+        String playerName = action.getActor(); // actor is the player name
+        int x = action.getX();
+        int y = action.getY();
+        Unit unit = action.getUnit();
+        FieldUnit newUnit = createFieldUnit(playerName, unit, x, y);
+        LogMessage("Created Evangelion for " + playerName + " at (" + x + "," + y + ")");
+
+        // Check if queue is now empty
+        List<QueuePosition> positions = queue.getQueue();
+        if (positions.isEmpty()) {
+            // Add a normal DM turn at the front
+            QueuePosition dmTurn = new QueuePosition("DM", false);
+            dmTurn.setActionNumber(-1);
+            addPositionAfterCurrent(dmTurn);
+            LogMessage("Queue empty after player setup, added DM turn.");
+        }
+    }
+
 
     // ============================================================
     //   UNIT MANAGEMENT
     // ============================================================
 
     public void initializeUnits(int pn) {
-
+        for (int i = 1; i <= pn; i++) {
+            createDMSetUpPopUpAction action = new createDMSetUpPopUpAction(currentActionNumber+i, "DM");
+            SendAction(action);
+            LogMessage("Sent DMSendRequestAction #" + i);
+        }
     }
-
     public FieldUnit getUnitFromName(String s) {
         for (FieldUnit unit : UnitList) {
             if (unit.getName().equals(s)) return unit;
@@ -491,14 +681,22 @@ public class Game {
     //   GAMEPLAY LOGIC
     // ============================================================
 
-    private void initializeGameplay() {
+    private void initializeGameplay(boolean sn) {
         queue = new Queue();
         QueuePosition initial = new QueuePosition("DM", false);
         initial.setActionNumber(-1);
-        queue.addPosition(initial, 0);
+        queue.addPosition(initial, 1);
         LogMessage("adding queue position for "+initial.getUnitID()+" at initialization");
         setActivePlayer("DM");
-        gamestate = new GameState();
+        if (sn) {
+            LogMessage("Creating new gamestate at creation");
+            gamestate = new GameState();
+            saveGameState();
+        }
+        else {
+            LogMessage("Loading state at creation");
+            loadInitialGameState();
+        }
     }
 
     private void SendAction(Action action) {
@@ -641,52 +839,10 @@ public class Game {
                 output.appendText("Sent DMCreateUnitAction for '" + name + "' at (" + x + ", " + y + ").\n");
                 break;
             case "actions":
-                List<Action> allActions = gamestate.getActions();
-                if (allActions.isEmpty()) {
-                    output.appendText("No actions in GameState.\n");
-                } else {
-                    StringBuilder sb = new StringBuilder("All actions in GameState:\n");
-                    for (int i = 0; i < allActions.size(); i++) {
-                        Action a = allActions.get(i);
-                        sb.append("  ").append(i).append(": ActionNumber=").append(a.getActionNumber())
-                                .append(", Type=").append(a.getClass().getSimpleName());
-
-                        if (a instanceof MoveAction) {
-                            MoveAction ma = (MoveAction) a;
-                            sb.append(", actor=").append(ma.getActor())
-                                    .append(", delta=(").append(ma.getDeltaX()).append(",").append(ma.getDeltaY()).append(")");
-                        } else if (a instanceof DMChoosePlayerAction) {
-                            DMChoosePlayerAction da = (DMChoosePlayerAction) a;
-                            sb.append(", actor=").append(da.getActor())
-                                    .append(", chosenPlayer=").append(da.getChosenPlayer());
-                        } else if (a instanceof DMCreateUnitAction) {
-                            DMCreateUnitAction ca = (DMCreateUnitAction) a;
-                            sb.append(", actor=").append(ca.getActor())
-                                    .append(", name=").append(ca.getUnitName())
-                                    .append(", x=").append(ca.getX())
-                                    .append(", y=").append(ca.getY());
-                        } else if (a instanceof DMDeleteUnitAction) {
-                            DMDeleteUnitAction da = (DMDeleteUnitAction) a;
-                            sb.append(", actor=").append(da.getActor())
-                                    .append(", x=").append(da.getX())
-                                    .append(", y=").append(da.getY());
-                        }
-                        sb.append("\n");
-                    }
-                    output.appendText(sb.toString());
-                }
-                break;
+                    output.appendText(outputActions());
+                    break;
             case "queue":
-                StringBuilder queueOutput = new StringBuilder("Queue positions (in order):\n");
-                List<QueuePosition> positions = queue.getQueue(); // getQueue() returns a list
-                for (int i = 0; i < positions.size(); i++) {
-                    QueuePosition pos = positions.get(i);
-                    queueOutput.append("  Position ").append(i)
-                            .append(": UnitID=").append(pos.getUnitID())
-                            .append(", ActionNumber=").append(pos.getActionNumber())
-                            .append("\n");
-                }
-                output.appendText(queueOutput.toString());
+                output.appendText(outputQueue());
                 break;
             case "delete":
                 if (parts.length < 2) {
@@ -720,7 +876,23 @@ public class Game {
                 SendAction(deleteAction);
                 output.appendText("Sent DMDeleteUnitAction for '" + delName + "' at (" + found.getX() + ", " + found.getY() + ").\n");
                 break;
-
+            case "current":
+                if (parts.length < 2) {
+                    output.appendText("Error: Usage: active <playerName>\n");
+                    return;
+                }
+                StringBuilder currentNameBuilder = new StringBuilder();
+                for (int j = 1; j < parts.length; j++) {
+                    if (j > 1) currentNameBuilder.append(" ");
+                    currentNameBuilder.append(parts[j]);
+                }
+                String currentName = currentNameBuilder.toString();
+                if (currentName.isEmpty()) {
+                    output.appendText("Error: Player name cannot be empty.\n");
+                    return;
+                }
+                setCurrentPlayer(currentName);
+                return;
             case "active":
                 if (parts.length < 2) {
                     output.appendText("Error: Usage: active <playerName>\n");
@@ -784,7 +956,276 @@ public class Game {
         }
         updateCurrentPlayerLabel();
         updateActivePlayerDisplay();
+        checkShowPopUp();
         LogMessage("Current player set to: " + name);
+    }
+
+    private void checkShowPopUp() {
+        if (!pendingActions.isEmpty()) {
+            LogMessage("Check to show pop -> fail, has pending actions");
+            return;
+        }
+        QueuePosition current = getCurrentPosition();
+        if (current != null) {
+            if (current.Reaction && current.getActionNumber() == -1 &&
+                    (currentPlayer.equals(activePlayer)) && !popupShowing) {
+                LogMessage("Check to show pop -> Showing pop up!");
+                showReactionPopup();
+            } else LogMessage("Check to show pop -> No pop up to show");
+        } else {
+            LogMessage("Check to show pop -> Queue is empty after processing.");
+            setActivePlayer(null);
+        }
+    }
+
+
+    private void showReactionPopup() {
+        QueuePosition current = getCurrentPosition();
+        if (current == null || !current.Reaction) return;
+
+        popupShowing = true;
+
+        Stage popupStage = new Stage();
+        popupStage.initModality(Modality.NONE);
+        popupStage.setTitle("Reaction Turn");
+
+        VBox content = new VBox(15);
+        content.setPadding(new Insets(20));
+        content.setAlignment(Pos.CENTER);
+
+        Label descLabel = new Label(current.getDescription());
+        descLabel.setStyle("-fx-font-size: 14px; -fx-font-weight: bold;");
+        content.getChildren().add(descLabel);
+
+        Node specificContent = null;
+        BetterButton confirmBtn = new BetterButton("Confirm");
+        BetterButton cancelBtn = null;
+
+        Action currentAction = gamestate.getActionfromNumber(getCurrentPosition().getReactionTo());
+        if (currentAction == null) {
+            LogMessage("ERROR: REACTION POP UP SHOWING WITHOUT PROPER ACTION TO REACT TO");
+            return;
+        }
+
+        switch (current.getReactionType()) {
+            case DM_SETUP_PLAYER:
+                specificContent = buildDMSetupContent(confirmBtn, popupStage, currentAction);
+                break;
+            case PLAYER_SETUP:
+                specificContent = buildPlayerSetupContent(confirmBtn, popupStage, currentAction);
+                break;
+            default:
+                // For other types, just show a message and confirm
+                specificContent = new Label("No specific actions for this reaction type.");
+                break;
+        }
+
+        if (specificContent != null) {
+            content.getChildren().add(specificContent);
+        }
+
+        // Confirm button logic: it will be enabled/disabled by the content builders
+        confirmBtn.setPrimaryStyle();
+        confirmBtn.setDisable(true); // initially disabled, enabled when valid
+
+        // TODO SKIPPABLE
+     /*   if (current.isSkippable()) {
+            cancelBtn = new BetterButton("Cancel");
+            cancelBtn.setDangerStyle();
+            cancelBtn.setOnAction(e -> {
+                // Skip this reaction: remove it from queue and update
+                removeCurrentPosition();
+                popupStage.close();
+                popupShowing = false;
+                updateActivePlayerAndPopup();
+            });
+        } */
+
+        HBox btnBox = new HBox(10);
+        btnBox.setAlignment(Pos.CENTER);
+        if (cancelBtn != null) btnBox.getChildren().add(cancelBtn);
+        btnBox.getChildren().add(confirmBtn);
+        content.getChildren().add(btnBox);
+
+        Scene scene = new Scene(content, 400, 300);
+        popupStage.setScene(scene);
+        popupStage.setOnCloseRequest(e -> {
+            if (!current.isSkippable()) {
+                e.consume();
+            } else {
+                //TODO skippable
+                popupShowing = false;
+                checkShowPopUp();
+            }
+        });
+        popupStage.show();
+        popupShowing = false;
+    }
+
+    private boolean nameIsPicked(String name, GameState gamestate1) {
+        boolean picked = false;
+        for (Action action : gamestate1.getActions()) {
+            if (action instanceof AddPlayerAction action1 && action1.getUnitName().equals(name)) {picked = true;
+            break;}
+        }
+        if (!UnitList.isEmpty()) {
+        for (FieldUnit unit : UnitList) {
+            if (unit.getName().equals(name)) {picked = true; break;}
+        }}
+        return picked;
+    }
+
+    private Node buildDMSetupContent(Button confirmBtn, Stage popupStage, Action cause) {
+        VBox vbox = new VBox(10);
+        vbox.setPadding(new Insets(5));
+
+        TextField nameField = new TextField();
+        nameField.setPromptText("Player name");
+        TextField xField = new TextField();
+        xField.setPromptText("X (0-" + (battlefield.sizeX-1) + ")");
+        TextField yField = new TextField();
+        yField.setPromptText("Y (0-" + (battlefield.sizeY-1) + ")");
+
+
+        Runnable validate = () -> {
+            boolean valid = false;
+            String name = nameField.getText().trim();
+            if (!name.isEmpty() && !nameIsPicked(name, gamestate)) {
+                try {
+                    int x = Integer.parseInt(xField.getText().trim());
+                    int y = Integer.parseInt(yField.getText().trim());
+                    if (x >= 0 && x < battlefield.sizeX && y >= 0 && y < battlefield.sizeY) {
+                        valid = true;
+                    }
+                } catch (NumberFormatException e) {
+                }
+            }
+            confirmBtn.setDisable(!valid);
+        };
+
+        nameField.textProperty().addListener((obs, old, neu) -> validate.run());
+        xField.textProperty().addListener((obs, old, neu) -> validate.run());
+        yField.textProperty().addListener((obs, old, neu) -> validate.run());
+
+        confirmBtn.setOnAction(e -> {
+            String name = nameField.getText().trim();
+            int x = Integer.parseInt(xField.getText().trim());
+            int y = Integer.parseInt(yField.getText().trim());
+
+            int location = currentActionNumber+1;
+            LogMessage("Creating INITIAL REQUEST action with AN "+location+ " current queue size "+queue.getQueue().size());
+            AddPlayerAction action = new AddPlayerAction(location, "DM", name, x, y
+            );
+            SendAction(action);
+            popupStage.close();
+        });
+
+        vbox.getChildren().addAll(
+                new Label("Enter player name and starting position:"),
+                new HBox(10, new Label("Name:"), nameField),
+                new HBox(10, new Label("X:"), xField),
+                new HBox(10, new Label("Y:"), yField)
+        );
+        return vbox;
+    }
+
+    private boolean isValidInt(String text) {
+        try {
+            int val = Integer.parseInt(text.trim());
+            // Optionally check bounds
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+    private Node buildPlayerSetupContent(Button confirmBtn, Stage popupStage, Action cause) {
+        VBox vbox = new VBox(10);
+        vbox.setPadding(new Insets(5));
+
+        if (!(cause instanceof AddPlayerAction))  {
+            LogMessage("ERROR - POP UP FOR PLAYERSETUP NOT FROM ADD PLAYER BUTTON");
+            return null;
+        }
+        int spawnX = ((AddPlayerAction) cause).getX();
+        int spawnY = ((AddPlayerAction) cause).getY();
+
+        QueuePosition current = getCurrentPosition();
+        String playerName = current != null ? current.getUnitID() : "Player";
+
+        Label playerLabel = new Label("Player: " + playerName);
+        playerLabel.setStyle("-fx-font-weight: bold;");
+
+        // Load saved Evangelion types
+        List<String> filenames = EvangelionIO.listFiles();
+        List<EvangelionType> evaTypes = new ArrayList<>();
+        if (filenames.isEmpty()) {
+            Label noEvaLabel = new Label("No saved Evangelions found. Please create one first.");
+            noEvaLabel.setStyle("-fx-text-fill: red;");
+            vbox.getChildren().addAll(playerLabel, noEvaLabel);
+            confirmBtn.setDisable(true);
+            return vbox;
+        }
+
+        for (String fname : filenames) {
+            try {
+                EvangelionType eva = EvangelionIO.load(fname);
+                evaTypes.add(eva);
+            } catch (IOException | ClassNotFoundException e) {
+                LogMessage("Failed to load Evangelion: " + fname + " - " + e.getMessage());
+            }
+        }
+
+        if (evaTypes.isEmpty()) {
+            Label noEvaLabel = new Label("No valid Evangelions could be loaded.");
+            noEvaLabel.setStyle("-fx-text-fill: red;");
+            vbox.getChildren().addAll(playerLabel, noEvaLabel);
+            confirmBtn.setDisable(true);
+            return vbox;
+        }
+
+        // ComboBox for EvangelionType
+        ComboBox<EvangelionType> typeCombo = new ComboBox<>();
+        typeCombo.getItems().addAll(evaTypes);
+        typeCombo.setPromptText("Select Evangelion Type");
+
+        // Also need X and Y fields? The action expects x and y. We'll ask for them.
+        Label xField = new Label();
+        xField.setText(""+spawnX);
+        Label yField = new Label();
+        yField.setText(""+spawnY);
+
+        Runnable validate = () -> {
+            boolean valid = typeCombo.getValue() != null &&
+                    isValidInt(xField.getText()) &&
+                    isValidInt(yField.getText());
+            confirmBtn.setDisable(!valid);
+        };
+
+        typeCombo.valueProperty().addListener((obs, old, neu) -> validate.run());
+        xField.textProperty().addListener((obs, old, neu) -> validate.run());
+        yField.textProperty().addListener((obs, old, neu) -> validate.run());
+
+        confirmBtn.setOnAction(e -> {
+            EvangelionType type = typeCombo.getValue();
+            int x = Integer.parseInt(xField.getText().trim());
+            int y = Integer.parseInt(yField.getText().trim());
+            // Create a new Evangelion unit
+            Unit unit = new Evangelion(type); // assuming Evangelion constructor takes type
+            // Or use a factory; adjust as needed.
+            PLAYERCreateEvangelionAction action = new PLAYERCreateEvangelionAction(
+                    currentActionNumber+1, playerName, playerName, x, y, unit
+            );
+            SendAction(action);
+            popupStage.close();
+        });
+
+        vbox.getChildren().addAll(
+                playerLabel,
+                new HBox(10, new Label("Evangelion Type:"), typeCombo),
+                new HBox(10, new Label("X:"), xField),
+                new HBox(10, new Label("Y:"), yField)
+        );
+        return vbox;
     }
 
     // ============================================================
@@ -1386,6 +1827,10 @@ public class Game {
         chatBtn.setPrimaryStyle();
         chatBtn.setOnAction(e -> showTab(chatTab));
 
+        BetterButton weaponCreatorBtn = new BetterButton("Weapon");
+        weaponCreatorBtn.setPrimaryStyle();
+        weaponCreatorBtn.setOnAction(e -> showTab(weaponCreatorTab));
+
         BetterButton dmBtn = new BetterButton("DM Screen");
         dmBtn.setPrimaryStyle();
         dmBtn.setOnAction(e -> showTab(dmTab));
@@ -1399,7 +1844,9 @@ public class Game {
         exitBtn.setDangerStyle();
         exitBtn.setOnAction(e -> stage.close());
 
-        bar.getChildren().addAll(bfBtn, invBtn, chatBtn, dmBtn, optionsBtn, exitBtn);
+
+
+        bar.getChildren().addAll(bfBtn, invBtn, chatBtn, weaponCreatorBtn, dmBtn, optionsBtn, exitBtn);
         return bar;
     }
 
@@ -1599,6 +2046,27 @@ public class Game {
         updateSliderRanges();
     }
 
+    private boolean popupShowing = false;
+
+    private QueuePosition getCurrentPosition() {
+        return queue.currentPosition();
+    }
+
+    private void addPositionAfterCurrent(QueuePosition pos) {
+        QueuePosition current = getCurrentPosition();
+        if (current == null) {
+            // No unprocessed turn – append at end
+            queue.getQueue().add(pos);
+            return;
+        }
+        queue.addPosition(pos, 1);
+    }
+
+    private void addPositionEnd(QueuePosition pos) {
+        queue.getQueue().add(pos);
+    }
+
+
     private void showResizeDialog() {
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle("Viewport Size");
@@ -1680,6 +2148,7 @@ public class Game {
 
     public void processMoveVisuals(FieldUnit unit, int Sx, int Sy, int Ex, int Ey, double duration) {
         if (duration <= 0) {
+            DrawArrow(Color.BLACK, Sx, Sy, Ex, Ey);
             Node circle = unitCircles.get(unit);
             if (circle != null) {
                 GridPane.setRowIndex(circle, Ey);
@@ -1764,7 +2233,13 @@ public class Game {
     }
 
     public void DrawArrow(Color color, int Sx, int Sy, int Ex, int Ey) {
-        drawAnimatedArrow(color, Sx, Sy, Ex, Ey, 0.5);
+        double oldCx = Sx * 20 + 10;
+        double oldCy = Sy * 20 + 10;
+        double newCx = Ex * 20 + 10;
+        double newCy = Ey * 20 + 10;
+
+        Arrow arrow = new Arrow(boardContainer, color, oldCx, oldCy,newCx, newCy);
+        arrows.add(arrow);
     }
 
     // ============================================================
@@ -1772,10 +2247,20 @@ public class Game {
     // ============================================================
 
 
-    public static void startGame(Battlefield field, String playerName, double speed, boolean fast, int playernumber) {
-        new Game(field, playerName, speed, fast, playernumber);
+    public static void startGame(Battlefield field, double speed, boolean fast, int playernumber) {
+        System.out.println("Starting game with speed "+speed+" fast "+fast+" playernumber "+playernumber);
+        new Game(field, "DM", speed, fast, playernumber, true);
     }
-
+    public static void startGame(Battlefield field, double speed, boolean fast,
+                                 int playernumber, String playerName, boolean startNew) {
+        // Temporary implementation – user will replace with actual load/create logic
+        if (startNew) {
+            startGame(field, speed, fast, playernumber);
+        } else {
+            System.out.println("Connecting as " + playerName);
+            new Game(field, playerName, speed, fast, -1, startNew);
+        }
+    }
 
 
 }
