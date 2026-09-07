@@ -11,6 +11,7 @@ module eva.evangelion {
     requires com.almasb.fxgl.all;
     requires com.fasterxml.jackson.databind;
     requires javafx.media;
+    requires java.desktop;
 
     opens eva.evangelion to javafx.fxml;
     exports eva.evangelion;

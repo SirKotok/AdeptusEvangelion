@@ -24,6 +24,31 @@ import java.util.Objects;
 
 public class MainMenu {
 
+    private static final double INPUT_CONTAINER_LEFT = 0.05;
+    private static final double INPUT_CONTAINER_WIDTH = 0.15;
+    private static final double INPUT_CONTAINER_TOP = 0.1;
+    private static final double INPUT_CONTAINER_HEIGHT = 0.3;
+
+    private static final double CUSTOM_CONTAINER_LEFT = 0.05;
+    private static final double CUSTOM_CONTAINER_WIDTH = 0.15;
+    private static final double CUSTOM_CONTAINER_TOP = 0.45;
+    private static final double CUSTOM_CONTAINER_HEIGHT = 0.4;
+
+    private static final double ACTION_CONTAINER_LEFT = 0.4;
+    private static final double ACTION_CONTAINER_WIDTH = 0.2;
+    private static final double ACTION_CONTAINER_TOP = 0.1;
+    private static final double ACTION_CONTAINER_HEIGHT = 0.2;
+
+    private static final double STATS_CONTAINER_LEFT = 0.25;
+    private static final double STATS_CONTAINER_WIDTH = 0.3;
+    private static final double STATS_CONTAINER_TOP = 0.3;
+    private static final double STATS_CONTAINER_HEIGHT = 0.4;
+
+    private static final double ICON_CONTAINER_LEFT = 0.6;
+    private static final double ICON_CONTAINER_WIDTH = 0.3;
+    private static final double ICON_CONTAINER_TOP = 0.3;
+    private static final double ICON_CONTAINER_HEIGHT = 0.4;
+
     private Stage mainStage;
     private Scene mainScene;
     private Pane root;

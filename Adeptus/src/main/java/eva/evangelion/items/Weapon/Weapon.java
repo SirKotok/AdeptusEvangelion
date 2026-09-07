@@ -172,6 +172,15 @@ Ranged Weapons only.  Your weapon gains Spray if it did not have Spray already w
    public List<AttackProfile> SpecialProfiles = new ArrayList<>();
    public boolean doesBasicProfiles;
    public List<Tech> Technology = new ArrayList<>();
+   public String displayIcon = "weapon_0.png";
+
+    public void setDisplayIcon(String displayIcon) {
+        this.displayIcon = displayIcon;
+    }
+
+    public String getDisplayIcon() {
+        return displayIcon;
+    }
 
     public String getProfileType() {
         return ProfileType;
