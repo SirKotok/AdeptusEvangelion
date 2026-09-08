@@ -12,6 +12,11 @@ public class Unit implements Serializable {
     int MaxStamina = 2;
     int Strength = 2;
     int RangedStrength = 2;
+    int ItemReach = 1;
+
+    public int getItemReach() {
+        return ItemReach;
+    }
 
     public Unit(){
 

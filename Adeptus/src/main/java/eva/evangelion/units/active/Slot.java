@@ -12,6 +12,11 @@ public class Slot implements Serializable {
     private boolean dynamic;  // true = DYNAMIC, false = STATIC
     private boolean intact;   // true = INTACT, false = DAMAGED
 
+    public String getName() {
+        return name;
+    }
+
+
     // ---- Size ----
     public enum Size {SMALL, LARGE, ANY }
     private Size size;

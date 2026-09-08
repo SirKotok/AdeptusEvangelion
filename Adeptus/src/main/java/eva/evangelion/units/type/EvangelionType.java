@@ -46,11 +46,17 @@ public class EvangelionType implements Serializable {
         Slots.add(Slot.ArmSlot("Right Arm"));
         Slots.add(Slot.StorageSlot("Left Storage"));
         Slots.add(Slot.StorageSlot("Right Storage"));
+        Slots.add(Slot.StorageSlot("A"));
+        Slots.add(Slot.StorageSlot("B"));
+        Slots.add(Slot.ArmSlot("Third Arm"));
         int i = 0;
         for (Slot slot : Slots) {
             i++;
-            slot.setItem(new Weapon("Weapon"+i, "Knife", Weapon.Hand.ONE_HANDED));
+            Weapon test = new Weapon("Weapon"+i, "Knife", Weapon.Hand.ONE_HANDED);
+            test.WeaponProperties.add(Weapon.WeaponProperty.SMALL);
+            slot.setItem(test);
         }
+
     }
 
     public EvangelionType(String name, String gameClass, List<Upgrade> upgrades) {

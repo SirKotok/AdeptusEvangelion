@@ -18,9 +18,8 @@ public class Weapon extends Item {
 
         /*
         Chain
-Chain weapons use thousands of blades to rip angels apart.  You deal 1 Strain per DoS on your Attack Test with a Chain Weapon (Maximum 3 Strain).  This is applied even if your target successfully Guards.
 Progressive
-Progressive weapons use sonic vibrations to enhance their cutting power or impact.  You have +2 Penetration with a Progressive Weapon.
+
 Polythermic
 Polythermic weapons use superheated ceramic to burn flesh.  You have +1 Penetration with a Polythermic Weapon.  When you roll damage with a Polythermic Weapon, you can choose to Overheat it, changing your weapon’s damage dice for this attack according to the chart below.  After using this ability, you take a -2 penalty to damage on your next attack with this weapon.  Angels instead take the Damage Penalty for 1 round
 Base Damage
@@ -172,15 +171,9 @@ Ranged Weapons only.  Your weapon gains Spray if it did not have Spray already w
    public List<AttackProfile> SpecialProfiles = new ArrayList<>();
    public boolean doesBasicProfiles;
    public List<Tech> Technology = new ArrayList<>();
-   public String displayIcon = "weapon_0.png";
 
-    public void setDisplayIcon(String displayIcon) {
-        this.displayIcon = displayIcon;
-    }
 
-    public String getDisplayIcon() {
-        return displayIcon;
-    }
+
 
     public String getProfileType() {
         return ProfileType;

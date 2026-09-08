@@ -3,6 +3,20 @@ package eva.evangelion.view;
 import eva.evangelion.gameboard.Battlefield;
 import eva.evangelion.gameboard.GameBoard;
 import eva.evangelion.gameboard.Sector;
+import eva.evangelion.view.UIElements.ScrollableContainer;
+import eva.evangelion.items.Weapon.Item;
+import eva.evangelion.items.Weapon.Weapon;
+import eva.evangelion.units.active.Slot;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
+import javafx.scene.input.Dragboard;
+import javafx.scene.input.TransferMode;
+import javafx.scene.layout.GridPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Pane;
+import javafx.scene.layout.StackPane;
+import javafx.scene.shape.Rectangle;
+import javafx.scene.input.ClipboardContent;
 import eva.evangelion.gameboard.SectorType;
 import eva.evangelion.state.GameState;
 import eva.evangelion.state.Queue;
@@ -49,10 +63,7 @@ import kotlin.Triple;
 
 import java.io.IOException;
 import java.nio.file.*;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 public class Game {
 
@@ -61,11 +72,15 @@ public class Game {
     // ============================================================
 
     private final Stage stage;
+    private GameBoard gameBoard;          // reference to the main board
+    private Item draggedItem;            // item being dragged
+    private Slot draggedFromSlot;        // slot from which the item is dragged
+    private Label descriptionLabel;      // description display
     private final BorderPane root;
     private final StackPane centerStack;
     private final List<Arrow> arrows = new ArrayList<>();
     public final VBox battlefieldTab;
-    public final VBox inventoryTab;
+    public VBox inventoryTab;
     public final VBox chatTab;
     public final VBox dmTab;
     private final VBox weaponCreatorTab;
@@ -135,7 +150,7 @@ public class Game {
         centerStack = new StackPane();
 
         battlefieldTab = buildBattlefieldTab();
-        inventoryTab = buildInventoryTab();
+        buildInventoryTab();
         chatTab = buildChatTab();
         dmTab = buildDmTab();
 
@@ -352,7 +367,21 @@ public class Game {
             setActivePlayer(next.getUnitID());
         }
     }
-
+    private void setBackgroundForInventory(ScrollableContainer mainContainer) {
+        LogMessage("Adding evanegelion picture");
+        Image backgroundImage = new Image(
+                Objects.requireNonNull(getClass().getResourceAsStream("/eva/evapicture.png")),
+                256, 256, false, false
+        );
+        BackgroundImage background = new BackgroundImage(
+                backgroundImage,
+                BackgroundRepeat.REPEAT,
+                BackgroundRepeat.REPEAT,
+                BackgroundPosition.DEFAULT,
+                null
+        );
+        mainContainer.setBackground(new Background(background));
+    }
 
     private void processMoveAction(MoveAction movement) {
         FieldUnit actor = getUnitFromName(movement.getActor());
@@ -622,6 +651,8 @@ public class Game {
             addPositionAfterCurrent(dmTurn);
             LogMessage("Queue empty after player setup, added DM turn.");
         }
+        if (playerName.equals(currentPlayer)) rebuildInventoryTab();
+
     }
 
 
@@ -958,6 +989,7 @@ public class Game {
         updateActivePlayerDisplay();
         checkShowPopUp();
         LogMessage("Current player set to: " + name);
+        rebuildInventoryTab();
     }
 
     private void checkShowPopUp() {
@@ -1523,30 +1555,257 @@ public class Game {
 
     // ---- Other Tabs (unchanged) ----
     private VBox buildInventoryTab() {
-        VBox wrapper = new VBox(10);
-        wrapper.setPadding(new Insets(10));
-        wrapper.setAlignment(Pos.TOP_LEFT);
+        inventoryTab = new VBox(10);
+        inventoryTab.setPadding(new Insets(10));
+        inventoryTab.setAlignment(Pos.TOP_LEFT);
+        rebuildInventoryTab();
+        return inventoryTab;
 
-        Label title = new Label("Inventory");
-        title.setStyle("-fx-font-size: 18px; -fx-font-weight: bold;");
+    }
+    private Node createMiniBattlefieldGrid(Evangelion eva) {
+        int reach = eva.getItemReach(); // or selectedUnit.getUnit().getItemReach()
+        int size = 2 * reach + 1;
+        int cellSize = 40; // larger than main board's 20
 
-        VBox content = new VBox(10);
-        content.setPadding(new Insets(10));
-        content.getChildren().addAll(
-                new BetterButton("Progressive Knife") {{ setPrimaryStyle(); }},
-                new BetterButton("Pallet Rifle") {{ setPrimaryStyle(); }},
-                new BetterButton("Shield") {{ setPrimaryStyle(); }}
-        );
+        GridPane grid = new GridPane();
+        grid.setHgap(0);
+        grid.setVgap(0);
 
-        ScrollPane scrollPane = new ScrollPane(content);
-        scrollPane.setFitToWidth(true);
-        scrollPane.setFitToHeight(true);
-        scrollPane.setPrefViewportWidth(800);
-        scrollPane.setPrefViewportHeight(600);
-        scrollPane.setStyle("-fx-background: #f0f0f0; -fx-background-color: #f0f0f0;");
+        FieldUnit fu = getUnitFromName(currentPlayer); // get position
+        int centerX = fu.getX();
+        int centerY = fu.getY();
 
-        wrapper.getChildren().addAll(title, scrollPane);
-        return wrapper;
+        for (int dx = -reach; dx <= reach; dx++) {
+            for (int dy = -reach; dy <= reach; dy++) {
+                int absX = centerX + dx;
+                int absY = centerY + dy;
+                Rectangle cell = new Rectangle(cellSize, cellSize);
+                cell.setStroke(Color.BLACK);
+                cell.setStrokeWidth(0.5);
+
+                // Determine color based on sector type
+                if (absX < 0 || absX >= battlefield.sizeX || absY < 0 || absY >= battlefield.sizeY) {
+                    cell.setFill(Color.DARKGRAY); // out of bounds
+                } else {
+                    // Get sector type from gameBoard
+                    if (gameBoard != null) {
+                        Sector sector = gameBoard.getSector(absX, absY);
+                        if (sector != null) {
+                            // Map sector type to color (simplified; adjust as needed)
+                            cell.setFill(sector.getType().getColor());
+                        } else {
+                            cell.setFill(Color.LIGHTGRAY);
+                        }
+                    } else {
+                        cell.setFill(Color.LIGHTGRAY);
+                    }
+                }
+
+                grid.add(cell, dx + reach, dy + reach);
+            }
+        }
+
+        // Make grid draggable within its container (panning)
+        Pane clipPane = new Pane(grid);
+        clipPane.setPrefSize(cellSize * size, cellSize * size);
+        clipPane.setClip(new Rectangle(cellSize * size, cellSize * size));
+
+        // Panning logic
+        final double[] dragStart = new double[2];
+        clipPane.setOnMousePressed(e -> {
+            if (e.isSecondaryButtonDown()) {
+                dragStart[0] = e.getSceneX() - clipPane.getLayoutX();
+                dragStart[1] = e.getSceneY() - clipPane.getLayoutY();
+            }
+        });
+        clipPane.setOnMouseDragged(e -> {
+            if (e.isSecondaryButtonDown()) {
+                double newX = e.getSceneX() - dragStart[0];
+                double newY = e.getSceneY() - dragStart[1];
+                // Clamp to keep grid within container? Optional.
+                clipPane.setLayoutX(newX);
+                clipPane.setLayoutY(newY);
+            }
+        });
+
+        // Drop target for items onto battlefield tiles
+        for (int dx = -reach; dx <= reach; dx++) {
+            for (int dy = -reach; dy <= reach; dy++) {
+                final int targetX = centerX + dx;
+                final int targetY = centerY + dy;
+                Rectangle cell = (Rectangle) grid.getChildren().get((dx+reach) * size + (dy+reach));
+                cell.setOnDragOver(event -> {
+                    if (draggedItem != null) {
+                        event.acceptTransferModes(TransferMode.MOVE);
+                    }
+                    event.consume();
+                });
+                cell.setOnDragDropped(event -> {
+                    if (draggedItem != null) {
+                        onDraggingItemToBattlefield(draggedItem, draggedFromSlot, targetX, targetY);
+                        event.setDropCompleted(true);
+                        draggedItem = null;
+                        draggedFromSlot = null;
+                    }
+                    event.consume();
+                });
+            }
+        }
+
+        return clipPane;
+    }
+
+    private void onDraggingItemToSlot(Item item, Slot fromSlot, Slot toSlot, boolean targetHadItem) {
+        LogMessage("DRAG ITEM: " + item.getName() + " from " + fromSlot.name +
+                " to " + toSlot.name + (targetHadItem ? " (replacing existing item)" : " (empty)"));
+    }
+
+    private void onDraggingItemToBattlefield(Item item, Slot fromSlot, int x, int y) {
+        LogMessage("DRAG ITEM TO BATTLEFIELD: " + item.getName() + " from " + fromSlot.name +
+                " to sector (" + x + "," + y + ")");
+    }
+
+
+    private void rebuildInventoryTab() {
+        LogMessage("Rebuilding Inventory Tab");
+        inventoryTab.getChildren().clear();
+        FieldUnit unit = getUnitFromName(currentPlayer);
+        if (unit == null || !(unit.getUnit() instanceof Evangelion)) {
+            Label placeholder = new Label("Select an Evangelion to view inventory.");
+            inventoryTab.getChildren().add(placeholder);
+            return;
+        }
+        Evangelion eva = (Evangelion) unit.getUnit();
+        BuildEvangelionInventory(eva);
+    }
+
+    private ScrollableContainer createContainer(double left, double width, double top, double height) {
+        ScrollableContainer container = new ScrollableContainer(left, width, top, height);
+        container.setStyle("-fx-background-color: #f4f4f4;");
+        return container;
+    }
+    private Node createSlotBox(int slotnum, Evangelion eva) {
+        VBox box = new VBox(5);
+        box.setPadding(new Insets(5));
+        box.setAlignment(Pos.CENTER);
+        box.setMinSize(60, 60);
+        box.setPrefSize(60, 60);
+        box.setStyle("-fx-border-color: #888; -fx-border-width: 1; -fx-background-color: #eee;");
+
+        // Slot name label (small)
+        Slot slot = eva.getSlots().get(slotnum);
+        Label nameLabel = new Label(slot.name);
+        nameLabel.setStyle("-fx-font-size: 9px; -fx-text-fill: #333;");
+        box.getChildren().add(nameLabel);
+
+        // Item display area
+        StackPane itemPane = new StackPane();
+        itemPane.setMinSize(40, 40);
+        itemPane.setPrefSize(40, 40);
+        Item currentItem = eva.getItemFromSlot(slotnum);
+        LogMessage("In slot "+slot.getName()+"item is "+ (currentItem != null ? currentItem.getName() : "NULL"));
+        if (currentItem != null) {
+            ImageView icon = getItemIcon(currentItem);
+            icon.setUserData(currentItem); // store item for drag
+            itemPane.getChildren().add(icon);
+            setupDragFromItem(icon, slot);
+        }
+        box.getChildren().add(itemPane);
+
+        // Click on box shows description
+        box.setOnMouseClicked(e -> {
+            if (currentItem != null) {
+                descriptionLabel.setText(currentItem.getDescription());
+            } else {
+                descriptionLabel.setText("Empty slot.");
+            }
+        });
+
+        // Drop target for items
+        setupDropTarget(box, slot, eva);
+
+        return box;
+    }
+    private void BuildEvangelionInventory(Evangelion eva) {
+        // Create root pane with relative sizing
+        Pane pane = new Pane();
+        pane.setPrefSize(900, 800);
+        pane.setStyle("-fx-background-color: #f4f4f4;");
+
+        // Constants (relative to pane size)
+        final double MAIN_LEFT = 0.2, MAIN_WIDTH = 0.4, MAIN_TOP = 0.1, MAIN_HEIGHT = 0.6;
+        final double EXTRA_LEFT = 0.2, EXTRA_WIDTH = 0.4, EXTRA_TOP = 0.72, EXTRA_HEIGHT = 0.1;
+        final double DESC_LEFT = 0.62, DESC_WIDTH = 0.2, DESC_TOP = 0.1, DESC_HEIGHT = 0.4;
+        final double GRID_LEFT = 0.62, GRID_WIDTH = 0.2, GRID_TOP = 0.52, GRID_HEIGHT = 0.2;
+
+        // --- Main container with 4 arm/base slots ---
+        ScrollableContainer mainContainer = createContainer(MAIN_LEFT, MAIN_WIDTH, MAIN_TOP, MAIN_HEIGHT);
+        mainContainer.setContainerPadding(new Insets(10));
+        mainContainer.setSpacing(5);
+        mainContainer.setBorderStyle("-fx-border-color: #2c3e50; -fx-border-width: 2; -fx-border-radius: 8;");
+        setBackgroundForInventory(mainContainer);
+        // Use a GridPane for the 4 main slots with margins
+        GridPane mainSlotsGrid = new GridPane();
+        mainSlotsGrid.setHgap(10);
+        mainSlotsGrid.setVgap(10);
+        mainSlotsGrid.setPadding(new Insets(5));
+        // Assuming slot order: leftArm(0), rightArm(1), leftBase(2), rightBase(3)
+
+        mainSlotsGrid.add(createSlotBox(0, eva), 0, 0);
+        mainSlotsGrid.add(createSlotBox(1, eva), 1, 0);
+        mainSlotsGrid.add(createSlotBox(2, eva), 0, 1);
+        mainSlotsGrid.add(createSlotBox(3, eva), 1, 1);
+
+        mainContainer.addNode(mainSlotsGrid);
+        pane.getChildren().add(mainContainer);
+
+        // --- Extra slots container (all other slots) ---
+        List<Slot> extraSlots = new ArrayList<>(eva.getSlots());
+        extraSlots.remove(eva.getSlots().get(0));
+        extraSlots.remove(eva.getSlots().get(1));
+        extraSlots.remove(eva.getSlots().get(2));
+        extraSlots.remove(eva.getSlots().get(3));
+
+        if (!extraSlots.isEmpty()) {
+            ScrollableContainer extraContainer = createContainer(EXTRA_LEFT, EXTRA_WIDTH, EXTRA_TOP, EXTRA_HEIGHT);
+            extraContainer.setContainerPadding(new Insets(5));
+            extraContainer.setSpacing(5);
+            extraContainer.setBackgroundColor(Color.rgb(255, 255, 255, 0.95));
+            extraContainer.setBorderStyle("-fx-border-color: #2c3e50; -fx-border-width: 2; -fx-border-radius: 8;");
+
+            HBox extraSlotsBox = new HBox(5);
+            for (Slot slot : extraSlots) {
+                extraSlotsBox.getChildren().add(createSlotBox(eva.getSlots().indexOf(slot), eva));
+            }
+            extraContainer.addNode(extraSlotsBox);
+            pane.getChildren().add(extraContainer);
+        }
+
+        // --- Description container ---
+        ScrollableContainer descContainer = createContainer(DESC_LEFT, DESC_WIDTH, DESC_TOP, DESC_HEIGHT);
+        descContainer.setContainerPadding(new Insets(10));
+        descContainer.setSpacing(5);
+        descContainer.setBackgroundColor(Color.rgb(255, 255, 255, 0.95));
+        descContainer.setBorderStyle("-fx-border-color: #2c3e50; -fx-border-width: 2; -fx-border-radius: 8;");
+
+        descriptionLabel = new Label("No item selected.");
+        descriptionLabel.setWrapText(true);
+        descContainer.addNode(descriptionLabel);
+        pane.getChildren().add(descContainer);
+
+        // --- Mini battlefield grid ---
+        ScrollableContainer gridContainer = createContainer(GRID_LEFT, GRID_WIDTH, GRID_TOP, GRID_HEIGHT);
+        gridContainer.setContainerPadding(new Insets(5));
+        gridContainer.setSpacing(0);
+        gridContainer.setBackgroundColor(Color.rgb(255, 255, 255, 0.95));
+        gridContainer.setBorderStyle("-fx-border-color: #2c3e50; -fx-border-width: 2; -fx-border-radius: 8;");
+
+        Node miniGrid = createMiniBattlefieldGrid(eva);
+        gridContainer.addNode(miniGrid);
+        pane.getChildren().add(gridContainer);
+
+        // Add the pane to inventoryTab
+        inventoryTab.getChildren().add(pane);
     }
 
     private VBox buildChatTab() {
@@ -1602,6 +1861,7 @@ public class Game {
         wrapper.getChildren().add(title);
 
         GameBoard board = createGameBoardFromBattlefield(battlefield);
+        this.gameBoard = board;
         if (board == null) {
             wrapper.getChildren().add(new Label("No battlefield data available."));
             return wrapper;
@@ -2242,6 +2502,55 @@ public class Game {
         arrows.add(arrow);
     }
 
+    private ImageView getItemIcon(Item item) {
+        String iconName = "weapon_0.png"; // default
+        iconName = item.getDisplayIcon();
+
+        try {
+            Image img = new Image(getClass().getResourceAsStream("/weapon_icons/" + iconName));
+            ImageView iv = new ImageView(img);
+            iv.setFitWidth(40);
+            iv.setFitHeight(40);
+            iv.setPreserveRatio(true);
+            return iv;
+        } catch (Exception e) {
+            // return empty pane if icon missing
+            return new ImageView();
+        }
+    }
+    private void setupDragFromItem(ImageView icon, Slot sourceSlot) {
+        icon.setOnDragDetected(event -> {
+            Dragboard db = icon.startDragAndDrop(TransferMode.MOVE);
+            ClipboardContent content = new ClipboardContent();
+            // We don't need to put actual data; we'll use class fields
+            content.putString("item-drag");
+            db.setContent(content);
+            draggedItem = (Item) icon.getUserData();
+            draggedFromSlot = sourceSlot;
+            event.consume();
+        });
+    }
+    private void setupDropTarget(Node target, Slot targetSlot, Evangelion eva) {
+        target.setOnDragOver(event -> {
+            if (event.getGestureSource() != target && draggedItem != null) {
+                // Check slot rules: only dynamic and intact slots can be dropped into
+                if (targetSlot.isDynamic() && targetSlot.isIntact()) {
+                    event.acceptTransferModes(TransferMode.MOVE);
+                }
+            }
+            event.consume();
+        });
+
+        target.setOnDragDropped(event -> {
+            if (draggedItem != null) {
+                onDraggingItemToSlot(draggedItem, draggedFromSlot, targetSlot, eva.getItemFromSlot(eva.getSlots().indexOf(targetSlot)) != null);
+                event.setDropCompleted(true);
+                draggedItem = null;
+                draggedFromSlot = null;
+            }
+            event.consume();
+        });
+    }
     // ============================================================
     //   LAUNCH METHODS
     // ============================================================

@@ -35,9 +35,14 @@ public class WeaponCreatorUI extends Pane {
     private static final double ACTION_CONTAINER_HEIGHT = 0.12;
 
     private static final double STATS_CONTAINER_LEFT = 0.4;
-    private static final double STATS_CONTAINER_WIDTH = 0.5;
+    private static final double STATS_CONTAINER_WIDTH = 0.24;
     private static final double STATS_CONTAINER_TOP = 0.04;
     private static final double STATS_CONTAINER_HEIGHT = 0.4;
+
+    private static final double DESCRIPTION_CONTAINER_LEFT = 0.65;
+    private static final double DESCRIPTION_CONTAINER_WIDTH = 0.25;
+    private static final double DESCRIPTION_CONTAINER_TOP = 0.04;
+    private static final double DESCRIPTION_CONTAINER_HEIGHT = 0.4;
 
     private static final double ICON_CONTAINER_LEFT = 0.4;
     private static final double ICON_CONTAINER_WIDTH = 0.5;
@@ -116,7 +121,7 @@ public class WeaponCreatorUI extends Pane {
     private ComboBox<BaseWeaponType> meleeTypeCombo;
     private ComboBox<BaseWeaponType> rangedTypeCombo;
     private BaseWeaponType currentType;
-
+    private Label descriptionLabel;
     private ComboBox<Weapon.Tech> techCombo;
     private ComboBox<Weapon.Tech> secondTechCombo;
     private VBox customizationBox;
@@ -133,6 +138,7 @@ public class WeaponCreatorUI extends Pane {
     private Weapon currentWeapon;
 
     // New containers
+    private ScrollableContainer descriptionContainer;
     private ScrollableContainer inputContainer;
     private ScrollableContainer customContainer;
     private ScrollableContainer actionContainer;
@@ -145,7 +151,7 @@ public class WeaponCreatorUI extends Pane {
         inputContainer = createContainer(INPUT_CONTAINER_LEFT, INPUT_CONTAINER_WIDTH, INPUT_CONTAINER_TOP, INPUT_CONTAINER_HEIGHT);
         customContainer = createContainer(CUSTOM_CONTAINER_LEFT, CUSTOM_CONTAINER_WIDTH, CUSTOM_CONTAINER_TOP, CUSTOM_CONTAINER_HEIGHT);
         actionContainer = createContainer(ACTION_CONTAINER_LEFT, ACTION_CONTAINER_WIDTH, ACTION_CONTAINER_TOP, ACTION_CONTAINER_HEIGHT);
-
+        descriptionContainer = createContainer(DESCRIPTION_CONTAINER_LEFT, DESCRIPTION_CONTAINER_WIDTH, DESCRIPTION_CONTAINER_TOP, DESCRIPTION_CONTAINER_HEIGHT);
         // Existing stats and icon containers (also using constants)
         statsScrollContainer = createContainer(STATS_CONTAINER_LEFT, STATS_CONTAINER_WIDTH, STATS_CONTAINER_TOP, STATS_CONTAINER_HEIGHT);
         ScrollableContainer iconScrollContainer = createContainer(ICON_CONTAINER_LEFT, ICON_CONTAINER_WIDTH, ICON_CONTAINER_TOP, ICON_CONTAINER_HEIGHT);
@@ -155,6 +161,10 @@ public class WeaponCreatorUI extends Pane {
         inputContainer.setBackgroundColor(Color.rgb(255, 255, 255, 0.95));
         inputContainer.setBorderStyle("-fx-border-color: #2c3e50; -fx-border-width: 2; -fx-border-radius: 8;");
 
+        descriptionContainer.setContainerPadding(new Insets(10));
+        descriptionContainer.setSpacing(5);
+        descriptionContainer.setBackgroundColor(Color.rgb(255, 255, 255, 0.95));
+        descriptionContainer.setBorderStyle("-fx-border-color: #2c3e50; -fx-border-width: 2; -fx-border-radius: 8;");
 
         customContainer.setContainerPadding(new Insets(10));
         customContainer.setSpacing(5);
@@ -171,6 +181,13 @@ public class WeaponCreatorUI extends Pane {
         Label nameLabel = new Label("Weapon Name:");
         nameField = new TextField("My Weapon");
         nameField.setPrefWidth(200); // adjust as needed
+
+        // -- description label -- //
+        descriptionLabel = new Label("");
+        descriptionLabel.setWrapText(true);
+        descriptionLabel.setStyle("-fx-font-size: 14px; -fx-text-fill: black;");
+        descriptionContainer.addNode(descriptionLabel);
+
 
         // ---- Weapon Type Selection ----
         Label meleeLabel = new Label("Melee Weapon:");
@@ -283,6 +300,7 @@ public class WeaponCreatorUI extends Pane {
                 if (c == Weapon.Customisation.DOUBLE_EDGED || c == Weapon.Customisation.BAYONET) {
                     updateSecondTechComboState();
                 }
+                updateDescription(getCustomisationDescription(c));
             });
             customCheckBoxes.put(c, cb);
             customizationBox.getChildren().add(cb);
@@ -295,11 +313,22 @@ public class WeaponCreatorUI extends Pane {
         // ---- Action Buttons ----
         BetterButton saveBtn = new BetterButton("Save Weapon");
         saveBtn.setSuccessStyle();
-        saveBtn.setOnAction(e -> saveWeapon());
+        saveBtn.setOnAction(e -> showSaveDialog());
 
         BetterButton clearBtn = new BetterButton("Clear");
         clearBtn.setDangerStyle();
-        clearBtn.setOnAction(e -> clearAll());
+        clearBtn.setOnAction(e -> {
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+            confirm.setTitle("Confirm Clear");
+            confirm.setHeaderText("Clear All Weapon Choices");
+            confirm.setContentText("This will reset all fields to their default values. Continue?");
+            confirm.getButtonTypes().setAll(ButtonType.CANCEL, ButtonType.OK);
+            confirm.showAndWait().ifPresent(response -> {
+                if (response == ButtonType.OK) {
+                    clearAll();
+                }
+            });
+        });
 
         // Add buttons to actionContainer
         actionContainer.addNode(saveBtn);
@@ -353,20 +382,97 @@ public class WeaponCreatorUI extends Pane {
                 customContainer,
                 actionContainer,
                 statsScrollContainer,
-                iconScrollContainer
+                iconScrollContainer,
+                descriptionContainer
         );
 
         // ---- Listeners ----
         techCombo.valueProperty().addListener((obs, oldVal, newVal) -> {
             updateStats();
             updateSecondTechComboState();
+            updateDescription(getTechDescription(newVal));
         });
-        secondTechCombo.valueProperty().addListener((obs, oldVal, newVal) -> updateStats());
+        secondTechCombo.valueProperty().addListener((obs, oldVal, newVal) -> {
+            updateStats();
+            updateDescription(getTechDescription(newVal));
+        });
         nameField.textProperty().addListener((obs, oldVal, newVal) -> updateStats());
 
         // Initial update
         updateCustomisationAvailability();
         updateStats();
+        updateDescription("");
+    }
+
+    private void showSaveDialog() {
+        if (currentWeapon == null) {
+            Alert alert = new Alert(Alert.AlertType.WARNING);
+            alert.setContentText("No weapon to save.");
+            alert.showAndWait();
+            return;
+        }
+
+        // Create a custom dialog
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Confirm Save");
+        dialog.setHeaderText("Save Weapon");
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.CANCEL, ButtonType.OK);
+
+        // Create content: label + text field
+        Label nameLabel = new Label("Weapon Name:");
+        TextField nameField = new TextField(currentWeapon.getName());
+        nameField.setPrefWidth(250);
+
+        Label fileStatusLabel = new Label();
+        fileStatusLabel.setWrapText(true);
+        fileStatusLabel.setStyle("-fx-text-fill: #c0392b; -fx-font-weight: bold;");
+
+        VBox content = new VBox(10, nameLabel, nameField, fileStatusLabel);
+        content.setPadding(new Insets(10));
+        dialog.getDialogPane().setContent(content);
+
+        // Get the OK button and cast to Button for text changes
+        Button okButton = (Button) dialog.getDialogPane().lookupButton(ButtonType.OK);
+
+        // Helper to update status based on current name field text
+        Runnable updateStatus = () -> {
+            String trimmed = nameField.getText().trim();
+            if (trimmed.isEmpty()) {
+                fileStatusLabel.setText("Name cannot be empty.");
+                okButton.setDisable(true);
+                return;
+            }
+            File dir = new File("Active/weapons");
+            if (!dir.exists()) dir.mkdirs();
+            String fileName = trimmed.replaceAll("[^a-zA-Z0-9]", "_") + ".ser";
+            File file = new File(dir, fileName);
+            if (file.exists()) {
+                fileStatusLabel.setText("File already exists. It will be OVERWRITTEN.");
+                okButton.setText("Overwrite");
+            } else {
+                fileStatusLabel.setText("New file will be created.");
+                okButton.setText("Save");
+            }
+            okButton.setDisable(false);
+        };
+
+        // Update when text changes
+        nameField.textProperty().addListener((obs, oldVal, newVal) -> updateStatus.run());
+
+        // Set initial status
+        updateStatus.run();
+
+        dialog.setResultConverter(buttonType -> buttonType);
+
+        Optional<ButtonType> result = dialog.showAndWait();
+        if (result.isPresent() && result.get() == ButtonType.OK) {
+
+            String newName = nameField.getText().trim();
+            if (!newName.isEmpty()) {
+                currentWeapon.setName(newName);
+            }
+            saveWeapon();
+        }
     }
 
     // ---- Helper Methods ----
@@ -529,6 +635,42 @@ public class WeaponCreatorUI extends Pane {
         }
     }
 
+    private void updateDescription(String text) {
+        descriptionLabel.setText(text);
+    }
+
+    private String getTechDescription(Weapon.Tech tech) {
+        if (tech == null) return "";
+        return switch (tech) {
+            case NONE -> "No check chosen";
+            case CHAIN -> "Chain weapons use thousands of blades to rip angels apart.\n\nYou deal 1 Strain per DoS on your Attack Test with a Chain Weapon (Maximum 3 Strain).\nThis is applied even if your target successfully Guards.\n";
+            case PROGRESSIVE -> "Progressive weapons use sonic vibrations to enhance their cutting power or impact.\n\nYou have +2 Penetration with a Progressive Weapon.";
+            case POLYTHERMIC -> "Polythermic weapons use superheated ceramic to burn flesh.\n\nYou have +1 Penetration with a Polythermic Weapon.\nWhen you roll damage with a Polythermic Weapon, you can choose to Overheat it, changing your weapon’s damage dice to a stronger profile.\n(1d6 or 2d3 -> 3d3)\n(1d10 or 2d6 -> 4d3+1)\n\nAfter using this ability, you take a -2 penalty to damage on your next attack with this weapon.";
+            case SUPERCONDUCTIVE -> "Superconductive weapons electrify the target, momentarily stunning them.\n\nYou have +1 Penetration with a Superconductive weapon.\n If you deal damage with a Superconductive weapon, you can choose to apply:\n- a -10 Penalty to the target’s next Attack Test\n- a -10 Penalty to the target’s next Guard attempt.\n\nMultiple applications of the same penalty do not stack.";
+            case GAUSS -> "Gauss Weapons use electromagnetism to launch powerful rounds at hypersonic velocity.\n\nYou deal an additional +1 damage per DoS on your attack test (maximum +4 Damage).";
+            case N2SHELL -> "N2 Shell Weapons detonate with an anti-matter explosion.\n\nAttacks you make with a N2 Weapon have the Area (0) Property.\nIf the weapon or attack is already Area, you instead gain +1 damage.\nYou can spend 1 extra Ammo when attacking with an N2 Weapon to increase the Area rating of this weapon by 1.";
+            case MASER -> "Maser Weapons fire concentrated beams of microwave energy.\n\nMaser Weapons have +1 Penetration.\nBy spending 1 extra Ammo, your attack gains the Line property and an additional +1 Penetration.";
+            case POSITRON -> "Positron Weapons pierce all manner of protections with ease.\n\nPositron Weapons have +2 Penetration.";
+            default -> "";
+        };
+    }
+
+    private String getCustomisationDescription(Weapon.Customisation c) {
+        return switch (c) {
+            case ANTI_ARMOR -> "Increase your Penetration by +1";
+            case BALANCED -> "This weapon gains Defensive 10.\n(Highest Defensive value gives bonus to Guard when weapon is in hand)";
+            case DOUBLE_EDGED -> "You can choose a second technology (Options change depending on the first Technology).\nAt Turn start you can set the technology this weapon uses for the turn";
+            case EXPLOSIVE -> "One time per battle you can forgo rolling and choose to deal maximum damage.";
+            case THROWING -> "The Weapon gains the Throwing property.\n\nIf your weapon is already Throwing, you extend its Range by 1 and the weapon returns to you on a Miss or the target’s successful Guard.";
+            case EXTRA_AMMO -> " If the weapon has 5 or more Ammo capacity, it gains +2 Ammo, otherwise it gains +1 Ammo.";
+            case BAYONET -> "The weapon incorporates a Knife inside of itself.\nApplying a Technology to the knife will increase requisition cost by 1";
+            case TELESCOPIC_SIGHT -> "When attacking an enemy at Range 3 or greater, your weapon gains Precise if it wasn’t Precise already.\n\nIf your weapon is already Precise, you instead gain +1 Damage on all Attack Actions you make at Range 3 or greater with this weapon, except for Blitz and Full Auto.";
+            case AUTO_LOADER -> "Your weapon gains Spray if it did not have Spray already when making attacks at Range 3 or closer.\n\nIf your weapon already has Spray, once per Battle you can make a Blitz or Full Auto Attack with this weapon without expending Ammo."; //TODO This cant be applied to weapons that have the area property
+            case REINFORCED -> "Increase the Ablative Value of the Shield by 1.  This may be purchased twice, for a total Ablative Value of 3.\n"; //TODO ADD SHIELDS
+            default -> "";
+        };
+    }
+
     private Weapon buildWeapon() {
         if (currentType == null) return null;
         Weapon.Tech primaryTech = techCombo.getValue();
@@ -569,7 +711,7 @@ public class WeaponCreatorUI extends Pane {
                     default -> {
                         w.Customisations.add(c);
                         switch (c) {
-                            case ANTI_ARMOR -> w.setBasePenetration(w.getBasePenetration() + 1);
+                          //  case ANTI_ARMOR -> w.setBasePenetration(w.getBasePenetration() + 1);
                             case BALANCED -> w.setDefensive(10);
                             case EXTRA_AMMO -> {
                                 if (w.isRanged()) {
@@ -607,7 +749,7 @@ public class WeaponCreatorUI extends Pane {
         int cost = computeCost(currentWeapon);
         StringBuilder stats = new StringBuilder();
         stats.append("Cost: ").append(cost).append(" Requisition\n");
-        stats.append("Hands: ").append(currentWeapon.getHands()).append("\n");
+        stats.append("Hands: ").append(currentWeapon.getHands().equals(Weapon.Hand.TWO_HANDED) ? "Two Handed" : "One Handed").append("\n");
         stats.append("Ranged: ").append(currentWeapon.isRanged() ? "Yes" : "No").append("\n");
         if (currentWeapon.isRanged()) {
             stats.append("Ammo: ").append(currentWeapon.getAmmo()).append(" / ").append(currentWeapon.getMaxAmmo()).append("\n");
@@ -619,23 +761,23 @@ public class WeaponCreatorUI extends Pane {
         } else {
             stats.append(currentWeapon.Technology.get(0));
             if (currentWeapon.Technology.size() > 1) {
-                stats.append(" (Secondary: ").append(currentWeapon.Technology.get(1)).append(")");
+                stats.append("\n");
+                if (currentWeapon.Customisations.contains(Weapon.Customisation.ENHANCED_BAYONET)) {
+                stats.append("(Knife: ").append(currentWeapon.Technology.get(1)).append(")");
+                } else {
+                    stats.append("(Secondary: ").append(currentWeapon.Technology.get(1)).append(")");
+                }
             }
         }
         stats.append("\n");
-
         stats.append("Damage: ").append(getDamageString(currentWeapon)).append("\n");
-
-        int pen = currentWeapon.getBasePenetration() + getTechPenetrationBonus(currentWeapon);
+        int pen = currentWeapon.getBasePenetration() + getTechPenetrationBonus(currentWeapon) + (currentWeapon.Customisations.contains(Weapon.Customisation.ANTI_ARMOR) ? 1 : 0);
         stats.append("Penetration: ").append(pen).append("\n");
-
         int area = currentWeapon.getBaseArea();
-        if (area == -2) stats.append("Area: Line\n");
+        if (area == -2) stats.append("Line\n");
         else if (area >= 0) stats.append("Area: ").append(area).append("\n");
         else stats.append("Area: None\n");
-
         stats.append("Defensive: ").append(currentWeapon.getDefensive()).append("\n");
-
         stats.append("Properties: ");
         if (currentWeapon.WeaponProperties.isEmpty()) {
             stats.append("None");
@@ -729,6 +871,7 @@ public class WeaponCreatorUI extends Pane {
         }
         updateCustomisationAvailability();
         updateStats();
+        updateDescription("Weapon Cleared");
     }
 
     public static void launchStandalone() {
