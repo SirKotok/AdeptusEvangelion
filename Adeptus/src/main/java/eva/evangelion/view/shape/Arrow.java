@@ -87,6 +87,14 @@ public class Arrow extends Line {
         canvas(endX, endY);  // no offset
     }
 
+    public void DrawArrowUIInventory(double startX, double startY, double endX, double endY) {
+        setStartX(startX);
+        setStartY(startY);
+        setEndX(endX);
+        setEndY(endY);
+        canvasInventory(endX, endY);
+    }
+
     public void setStartEnd(double startX, double startY, double endX, double endY) {
         StartX = startX;
         StartY = startY;
@@ -104,6 +112,46 @@ public class Arrow extends Line {
         triangle.setLayoutY(y);
         updateTriangleRotation();
     }
+
+    public void canvasInventory(double x, double y) {
+        double dx = getEndX() - getStartX();
+        double dy = getEndY() - getStartY();
+        double len = Math.hypot(dx, dy);
+
+        // Если стрелка вырождена — просто кладём треугольник в (x, y) без поворота
+        if (len < 1e-6) {
+            triangle.getPoints().setAll(
+                    x,      y,
+                    x - 16, y - 8,
+                    x - 16, y + 8
+            );
+        } else {
+            double cos = dx / len;
+            double sin = dy / len;
+
+            // Перпендикуляр к направлению стрелки
+            double perpX = -sin * 8;
+            double perpY =  cos * 8;
+
+            // Основание треугольника — 16 пикселей назад от вершины
+            double baseX = x - 16 * cos;
+            double baseY = y - 16 * sin;
+
+            triangle.getPoints().setAll(
+                    x,                y,                 // вершина
+                    baseX + perpX,    baseY + perpY,     // один угол основания
+                    baseX - perpX,    baseY - perpY      // другой угол основания
+            );
+        }
+
+        // Гарантируем, что никакие layout/translate/rotate не добавляют смещений
+        triangle.setLayoutX(0);
+        triangle.setLayoutY(0);
+        triangle.setTranslateX(0);
+        triangle.setTranslateY(0);
+        triangle.getTransforms().clear();
+    }
+
 
     private void updateTriangleRotation() {
         double angle = Math.toDegrees(Math.atan2(

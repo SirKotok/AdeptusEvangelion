@@ -1,11 +1,18 @@
 package eva.evangelion.view;
 
+import eva.evangelion.state.actions.*;
+import javafx.beans.InvalidationListener;
+import javafx.geometry.Bounds;
+import javafx.geometry.Point2D;
+import javafx.scene.Node;
+import javafx.scene.layout.Pane;
+import javafx.scene.paint.Color;
+import eva.evangelion.view.shape.Arrow;
 import eva.evangelion.gameboard.Battlefield;
 import eva.evangelion.gameboard.GameBoard;
 import eva.evangelion.gameboard.Sector;
 import eva.evangelion.view.UIElements.ScrollableContainer;
 import eva.evangelion.items.Weapon.Item;
-import eva.evangelion.items.Weapon.Weapon;
 import eva.evangelion.units.active.Slot;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
@@ -13,7 +20,6 @@ import javafx.scene.input.Dragboard;
 import javafx.scene.input.TransferMode;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
-import javafx.scene.layout.Pane;
 import javafx.scene.layout.StackPane;
 import javafx.scene.shape.Rectangle;
 import javafx.scene.input.ClipboardContent;
@@ -21,13 +27,7 @@ import eva.evangelion.gameboard.SectorType;
 import eva.evangelion.state.GameState;
 import eva.evangelion.state.Queue;
 import eva.evangelion.state.QueuePosition;
-import eva.evangelion.state.actions.Action;
-import eva.evangelion.state.actions.MoveAction;
-import eva.evangelion.state.actions.DMChoosePlayerAction;
 import eva.evangelion.units.battle.Evangelion;
-import eva.evangelion.state.actions.createDMSetUpPopUpAction;
-import eva.evangelion.state.actions.AddPlayerAction;
-import eva.evangelion.state.actions.PLAYERCreateEvangelionAction;
 import eva.evangelion.state.QueuePosition.ReactionType;
 import eva.evangelion.units.type.EvangelionIO;
 import eva.evangelion.units.type.EvangelionType;
@@ -41,9 +41,7 @@ import javafx.beans.property.DoubleProperty;
 import javafx.beans.property.SimpleDoubleProperty;
 import javafx.stage.Modality;
 import javafx.util.Duration;
-import eva.evangelion.state.actions.DMCreateUnitAction;
-import eva.evangelion.state.actions.DMDeleteUnitAction;
-import eva.evangelion.view.shape.Arrow;
+
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
 import javafx.collections.FXCollections;
@@ -51,13 +49,10 @@ import javafx.collections.ListChangeListener;
 import javafx.collections.ObservableList;
 import javafx.geometry.*;
 import javafx.scene.Cursor;
-import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.input.MouseButton;
 import javafx.scene.layout.*;
-import javafx.scene.paint.Color;
-import javafx.scene.shape.Rectangle;
 import javafx.stage.Stage;
 import kotlin.Triple;
 
@@ -78,7 +73,7 @@ public class Game {
     private Label descriptionLabel;      // description display
     private final BorderPane root;
     private final StackPane centerStack;
-    private final List<Arrow> arrows = new ArrayList<>();
+    private final List<Arrow> actionArrows = new ArrayList<>();
     public final VBox battlefieldTab;
     public VBox inventoryTab;
     public final VBox chatTab;
@@ -1642,7 +1637,10 @@ public class Game {
                 });
                 cell.setOnDragDropped(event -> {
                     if (draggedItem != null) {
-                        onDraggingItemToBattlefield(draggedItem, draggedFromSlot, targetX, targetY);
+                        onDraggingItemToBattlefield(
+                                draggedItem, draggedFromSlot,
+                                targetX, targetY,
+                                cell);              // <-- pass the target Node
                         event.setDropCompleted(true);
                         draggedItem = null;
                         draggedFromSlot = null;
@@ -1655,14 +1653,63 @@ public class Game {
         return clipPane;
     }
 
+
+    private final Map<Slot, Node> slotNodes = new HashMap<>();
+    private final List<Arrow> InventoryUIArrows = new ArrayList<>();
+
+    /**
+     * Finds the lowest Pane that is an ancestor of both nodes.
+     * Returns null if no such Pane exists.
+     */
+    private Pane findCommonAncestorPane(Node a, Node b) {
+        if (a == null || b == null) return null;
+        Set<Node> ancestorsOfA = new HashSet<>();
+        for (Node n = a; n != null; n = n.getParent()) ancestorsOfA.add(n);
+        for (Node n = b; n != null; n = n.getParent()) {
+            if (ancestorsOfA.contains(n) && n instanceof Pane) return (Pane) n;
+        }
+        return null;
+    }
+
+    /** Removes arrows drawn by the previous drag-and-drop operation. */
+    private void clearUIArrows() {
+        for (Arrow a : InventoryUIArrows) a.delete();
+        InventoryUIArrows.clear();
+    }
+
     private void onDraggingItemToSlot(Item item, Slot fromSlot, Slot toSlot, boolean targetHadItem) {
         LogMessage("DRAG ITEM: " + item.getName() + " from " + fromSlot.name +
                 " to " + toSlot.name + (targetHadItem ? " (replacing existing item)" : " (empty)"));
+        Node fromNode = slotNodes.get(fromSlot);
+        Node toNode   = slotNodes.get(toSlot);
+        if (fromNode == null || toNode == null) {
+            LogMessage("Could not find nodes for arrow endpoints (from=" + fromSlot
+                    + ", to=" + toSlot + ")");
+            return;
+        }
+        clearUIArrows();
+        Arrow arrow = DrawArrowBetweenInventoryNodes(fromNode, toNode, Color.ORANGE);
+        if (arrow != null) InventoryUIArrows.add(arrow);
+        //TODO REMAKE THIS MAKE IT BETTER ?!?!?!?
+        pendingAction = new InventorySwapAction(currentActionNumber, currentPlayer, ((Evangelion) getUnitFromName(currentPlayer).getUnit()).getSlots().indexOf(fromSlot), ((Evangelion) getUnitFromName(currentPlayer).getUnit()).getSlots().indexOf(toSlot));
+
+        createConfirmButton(pendingAction);
     }
 
-    private void onDraggingItemToBattlefield(Item item, Slot fromSlot, int x, int y) {
+    private void onDraggingItemToBattlefield(Item item, Slot fromSlot,
+                                             int x, int y, Node targetNode) {
         LogMessage("DRAG ITEM TO BATTLEFIELD: " + item.getName() + " from " + fromSlot.name +
                 " to sector (" + x + "," + y + ")");
+
+        Node fromNode = slotNodes.get(fromSlot);
+        if (fromNode == null || targetNode == null) {
+            LogMessage("Could not find nodes for arrow endpoints (from=" + fromSlot
+                    + ", targetCell=" + targetNode + ")");
+            return;
+        }
+        clearUIArrows();
+        Arrow arrow = DrawArrowBetweenInventoryNodes(fromNode, targetNode, Color.LIMEGREEN);
+        if (arrow != null) InventoryUIArrows.add(arrow);
     }
 
 
@@ -1694,6 +1741,8 @@ public class Game {
 
         // Slot name label (small)
         Slot slot = eva.getSlots().get(slotnum);
+        slotNodes.put(slot, box);
+        LogMessage("creating slotbox for "+slot.getName()+" current slotNodes size = "+slotNodes.size());
         Label nameLabel = new Label(slot.name);
         nameLabel.setStyle("-fx-font-size: 9px; -fx-text-fill: #333;");
         box.getChildren().add(nameLabel);
@@ -1728,10 +1777,12 @@ public class Game {
     }
     private void BuildEvangelionInventory(Evangelion eva) {
         // Create root pane with relative sizing
-        Pane pane = new Pane();
-        pane.setPrefSize(900, 800);
-        pane.setStyle("-fx-background-color: #f4f4f4;");
+        inventoryOverlay = new Pane();
+        inventoryOverlay.setPrefSize(900, 800);
+        inventoryOverlay.setStyle("-fx-background-color: #f4f4f4;");
 
+        slotNodes.clear();
+        clearUIArrows();
         // Constants (relative to pane size)
         final double MAIN_LEFT = 0.2, MAIN_WIDTH = 0.4, MAIN_TOP = 0.1, MAIN_HEIGHT = 0.6;
         final double EXTRA_LEFT = 0.2, EXTRA_WIDTH = 0.4, EXTRA_TOP = 0.72, EXTRA_HEIGHT = 0.1;
@@ -1757,7 +1808,7 @@ public class Game {
         mainSlotsGrid.add(createSlotBox(3, eva), 1, 1);
 
         mainContainer.addNode(mainSlotsGrid);
-        pane.getChildren().add(mainContainer);
+        inventoryOverlay.getChildren().add(mainContainer);
 
         // --- Extra slots container (all other slots) ---
         List<Slot> extraSlots = new ArrayList<>(eva.getSlots());
@@ -1778,7 +1829,7 @@ public class Game {
                 extraSlotsBox.getChildren().add(createSlotBox(eva.getSlots().indexOf(slot), eva));
             }
             extraContainer.addNode(extraSlotsBox);
-            pane.getChildren().add(extraContainer);
+            inventoryOverlay.getChildren().add(extraContainer);
         }
 
         // --- Description container ---
@@ -1791,7 +1842,7 @@ public class Game {
         descriptionLabel = new Label("No item selected.");
         descriptionLabel.setWrapText(true);
         descContainer.addNode(descriptionLabel);
-        pane.getChildren().add(descContainer);
+        inventoryOverlay.getChildren().add(descContainer);
 
         // --- Mini battlefield grid ---
         ScrollableContainer gridContainer = createContainer(GRID_LEFT, GRID_WIDTH, GRID_TOP, GRID_HEIGHT);
@@ -1802,10 +1853,10 @@ public class Game {
 
         Node miniGrid = createMiniBattlefieldGrid(eva);
         gridContainer.addNode(miniGrid);
-        pane.getChildren().add(gridContainer);
+        inventoryOverlay.getChildren().add(gridContainer);
 
         // Add the pane to inventoryTab
-        inventoryTab.getChildren().add(pane);
+        inventoryTab.getChildren().add(inventoryOverlay);
     }
 
     private VBox buildChatTab() {
@@ -2430,7 +2481,7 @@ public class Game {
         double newCy = newY * 20 + 10;
 
         Arrow arrow = new Arrow(boardContainer, color, oldCx, oldCy, oldCx, oldCy);
-        arrows.add(arrow);
+        actionArrows.add(arrow);
         DoubleProperty progress = new SimpleDoubleProperty(0);
         progress.addListener((obs, oldVal, newVal) -> {
             double fraction = newVal.doubleValue();
@@ -2499,7 +2550,94 @@ public class Game {
         double newCy = Ey * 20 + 10;
 
         Arrow arrow = new Arrow(boardContainer, color, oldCx, oldCy,newCx, newCy);
-        arrows.add(arrow);
+        actionArrows.add(arrow);
+    }
+
+    // ============================================================
+//   UI ARROW BETWEEN TWO NODES
+// ============================================================
+
+    /**
+     * Transparent Pane that sits on top of the whole inventory view.
+     * All drag arrows are drawn here so they never get clipped or
+     * repositioned by inner layout containers (GridPane / HBox / ScrollableContainer).
+     */
+    private Pane inventoryOverlay;
+
+    /**
+     * Draws an arrow from the centre of {@code from} to the centre of {@code to}.
+     * The arrow lives inside {@link #boardContainer} by default and is updated
+     * automatically on any window / layout / transform change.
+     */
+    public Arrow DrawArrowBetweenInventoryNodes(Node from, Node to, Color color) {
+        Pane pane = inventoryOverlay;
+        return DrawArrowBetweenUI(from, to, color, pane);
+    }
+
+    /**
+     * Same as above but allows you to specify a custom parent Pane
+     * (the arrow is added as a child of that pane).
+     */
+    public Arrow DrawArrowBetweenUI(Node from, Node to, Color color, Pane parent) {
+        if (from == null || to == null || parent == null) return null;
+
+
+        Arrow arrow = new Arrow(parent, color, 0, 0, 0, 0);
+
+        InvalidationListener updateListener =
+                obs -> updateArrowBetweenUI(arrow, from, to, parent);
+
+        // --- Listen to node transforms (fires when a node moves / is laid out) ---
+        from.localToSceneTransformProperty().addListener(updateListener);
+        to  .localToSceneTransformProperty().addListener(updateListener);
+        parent.localToSceneTransformProperty().addListener(updateListener);
+
+        // --- Listen to parent size changes (sceneToLocal depends on it) ---
+        parent.widthProperty().addListener(updateListener);
+        parent.heightProperty().addListener(updateListener);
+
+        // --- Listen to Scene resize. The Scene may not exist yet, so attach lazily. ---
+        parent.sceneProperty().addListener((obs, oldScene, newScene) -> {
+            if (oldScene != null) {
+                oldScene.widthProperty().removeListener(updateListener);
+                oldScene.heightProperty().removeListener(updateListener);
+            }
+            if (newScene != null) {
+                newScene.widthProperty().addListener(updateListener);
+                newScene.heightProperty().addListener(updateListener);
+                updateArrowBetweenUI(arrow, from, to, parent);
+            }
+        });
+        if (parent.getScene() != null) {
+            parent.getScene().widthProperty().addListener(updateListener);
+            parent.getScene().heightProperty().addListener(updateListener);
+        }
+
+        // Initial placement
+        updateArrowBetweenUI(arrow, from, to, parent);
+        return arrow;
+    }
+
+    /** Recomputes arrow endpoints from the two nodes' centres. */
+    private void updateArrowBetweenUI(Arrow arrow, Node from, Node to, Pane parent) {
+        Bounds fb = from.getBoundsInLocal();
+        Bounds tb = to.getBoundsInLocal();
+
+        // Centre of "from" in scene coordinates
+        Point2D fromScene = from.localToScene(
+                fb.getMinX() + fb.getWidth()  / 2.0,
+                fb.getMinY() + fb.getHeight() / 2.0);
+        // Centre of "to" in scene coordinates
+        Point2D toScene = to.localToScene(
+                tb.getMinX() + tb.getWidth()  / 2.0,
+                tb.getMinY() + tb.getHeight() / 2.0);
+
+
+        Point2D fromLocal = parent.sceneToLocal(fromScene);
+        Point2D toLocal   = parent.sceneToLocal(toScene);
+
+        arrow.DrawArrowUIInventory(fromLocal.getX(), fromLocal.getY(),
+                toLocal.getX(),   toLocal.getY());
     }
 
     private ImageView getItemIcon(Item item) {
@@ -2543,7 +2681,11 @@ public class Game {
 
         target.setOnDragDropped(event -> {
             if (draggedItem != null) {
-                onDraggingItemToSlot(draggedItem, draggedFromSlot, targetSlot, eva.getItemFromSlot(eva.getSlots().indexOf(targetSlot)) != null);
+                onDraggingItemToSlot(
+                        draggedItem,
+                        draggedFromSlot,
+                        targetSlot,
+                        eva.getItemFromSlot(eva.getSlots().indexOf(targetSlot)) != null);
                 event.setDropCompleted(true);
                 draggedItem = null;
                 draggedFromSlot = null;
