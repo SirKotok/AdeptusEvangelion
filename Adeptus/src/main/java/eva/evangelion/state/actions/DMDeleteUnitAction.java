@@ -8,6 +8,7 @@ public class DMDeleteUnitAction extends Action {
         super(actionNumber, actor);
         this.x = x;
         this.y = y;
+        setTime(0.01);
     }
 
 

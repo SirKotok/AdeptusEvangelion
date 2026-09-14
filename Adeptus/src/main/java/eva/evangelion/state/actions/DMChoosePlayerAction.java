@@ -12,6 +12,7 @@ public class DMChoosePlayerAction extends Action {
     public DMChoosePlayerAction(int actionNumber, String actor, String chosenPlayer) {
         super(actionNumber, actor);
         this.chosenPlayer = chosenPlayer;
+        setTime(0.01);
     }
 
     public String getChosenPlayer() {

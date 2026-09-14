@@ -14,6 +14,7 @@ public class PLAYERCreateEvangelionAction extends Action {
         this.x = x;
         this.y = y;
         this.unit = unit;
+        setTime(0.01);
     }
 
     public String getUnitName() { return unitName; }

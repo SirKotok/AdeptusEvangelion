@@ -10,6 +10,7 @@ public class AddPlayerAction extends Action {
         this.unitName = unitName;
         this.x = x;
         this.y = y;
+        setTime(0.01);
     }
 
     public String getUnitName() { return unitName; }

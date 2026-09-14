@@ -10,22 +10,18 @@ public class Item implements Serializable {
     public Item(String name) {
         Name = name;
     }
-
     public String getDescription() {
         return descriptionDisplay;
     }
-
     public String getName() {
         return Name;
     }
-
     public void setName(String name) {
         Name = name;
     }
     public void setDisplayIcon(String displayIcon) {
         this.displayIcon = displayIcon;
     }
-
     public String getDisplayIcon() {
         return displayIcon;
     }

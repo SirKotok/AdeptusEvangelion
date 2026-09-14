@@ -51,6 +51,7 @@ public class Slot implements Serializable {
     // ---- Item ----
     public Item getItem() { return item; }
     public void setItem(Item item) {
+        if (item == null) this.item = null; else 
         if (canFit(item)) this.item = item; else System.out.println("ITEM DOESNT FIT WTF HOW DID YOU SET IT");
     }
 

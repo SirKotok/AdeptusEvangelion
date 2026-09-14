@@ -1,6 +1,8 @@
 package eva.evangelion.view.shape;
 
 import javafx.beans.binding.DoubleBinding;
+import javafx.css.StyleOrigin;
+import javafx.css.StyleableProperty;
 import javafx.scene.layout.Pane;
 import javafx.scene.paint.Color;
 import javafx.scene.shape.Line;
@@ -11,6 +13,15 @@ public class Arrow extends Line {
 
     private Polygon triangle;
     private Pane Parent;
+    public enum ArrowType {
+        ACTION,
+        PREVIEW,
+        NONE
+    }
+
+    public Polygon getTriangle() {
+        return triangle;
+    }
 
     // -------- Constructors --------
     public Arrow(Pane Parent) {
@@ -32,13 +43,34 @@ public class Arrow extends Line {
         triangle.setDisable(true);
     }
 
-    // New double constructor (for animation) – triangle is defined with tip at (0,0)
+
     public Arrow(Pane parent, Color color, double startX, double startY, double endX, double endY) {
         super(startX, startY, endX, endY);
         this.Parent = parent;
         triangle = new Polygon(0, 0, -16, -8, -16, 8); // tip at (0,0)
-        triangle.setFill(color);
-        triangle.setStroke(color);
+        SetColor(color);
+        parent.getChildren().addAll(this, triangle);
+        this.setDisable(true);
+        triangle.setDisable(true);
+        canvas(endX, endY);
+    }
+
+    public ArrowType arrowType;
+
+    public ArrowType getArrowType() {
+        return arrowType;
+    }
+
+    public void setArrowType(ArrowType arrowType) {
+        this.arrowType = arrowType;
+    }
+
+    public Arrow(Pane parent, Color color, double startX, double startY, double endX, double endY, ArrowType type) {
+        super(startX, startY, endX, endY);
+        this.Parent = parent;
+        this.arrowType = type;
+        triangle = new Polygon(0, 0, -16, -8, -16, 8); // tip at (0,0)
+        SetColor(color);
         parent.getChildren().addAll(this, triangle);
         this.setDisable(true);
         triangle.setDisable(true);
@@ -67,7 +99,7 @@ public class Arrow extends Line {
     }
 
     public void SetColor(Color color) {
-        this.setStroke(color);
+        ((StyleableProperty)this.strokeProperty()).applyStyle((StyleOrigin)null, color);
         triangle.setFill(color);
     }
 
@@ -87,33 +119,15 @@ public class Arrow extends Line {
         canvas(endX, endY);  // no offset
     }
 
-    public void DrawArrowUIInventory(double startX, double startY, double endX, double endY) {
+    public void DrawArrowUI(double startX, double startY, double endX, double endY) {
         setStartX(startX);
         setStartY(startY);
         setEndX(endX);
         setEndY(endY);
-        canvasInventory(endX, endY);
+        canvas(endX, endY);  // no offset
     }
 
-    public void setStartEnd(double startX, double startY, double endX, double endY) {
-        StartX = startX;
-        StartY = startY;
-        EndX = endX;
-        EndY = endY;
-    }
-
-    public void UpdateArrow(double x, double y) {
-        DrawArrow(StartX - x, StartY - y, EndX - x, EndY - y);
-    }
-
-    public void canvas(double x, double y) {
-        // Place triangle at the end of the line
-        triangle.setLayoutX(x);
-        triangle.setLayoutY(y);
-        updateTriangleRotation();
-    }
-
-    public void canvasInventory(double x, double y) {
+    public void canvasUI(double x, double y) {
         double dx = getEndX() - getStartX();
         double dy = getEndY() - getStartY();
         double len = Math.hypot(dx, dy);
@@ -152,6 +166,24 @@ public class Arrow extends Line {
         triangle.getTransforms().clear();
     }
 
+
+    public void setStartEnd(double startX, double startY, double endX, double endY) {
+        StartX = startX;
+        StartY = startY;
+        EndX = endX;
+        EndY = endY;
+    }
+
+    public void UpdateArrow(double x, double y) {
+        DrawArrow(StartX - x, StartY - y, EndX - x, EndY - y);
+    }
+
+    public void canvas(double x, double y) {
+        // Place triangle at the end of the line
+        triangle.setLayoutX(x);
+        triangle.setLayoutY(y);
+        updateTriangleRotation();
+    }
 
     private void updateTriangleRotation() {
         double angle = Math.toDegrees(Math.atan2(

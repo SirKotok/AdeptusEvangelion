@@ -13,6 +13,7 @@ public class DMCreateUnitAction extends Action {
         this.unitName = unitName;
         this.x = x;
         this.y = y;
+        setTime(0.01);
     }
 
     public Unit getUnit() {
