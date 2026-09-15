@@ -16,6 +16,8 @@ public class FieldUnit {
     public Circle UnitCircle;
     public boolean Exists = true;
     private int team;
+    private boolean usedGuard = false;
+
 
     public int getTeam() {
         return team;
@@ -237,5 +239,11 @@ public class FieldUnit {
     }
 
 
-    
+    public boolean usedGuard() {
+        return usedGuard;
+    }
+
+    public void setUsedGuard(boolean usedGuard) {
+        this.usedGuard = usedGuard;
+    }
 }

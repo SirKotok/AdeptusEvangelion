@@ -3,8 +3,7 @@ package eva.evangelion.view;
 import eva.evangelion.gameboard.Battlefield;
 import eva.evangelion.gameboard.GameBoard;
 import eva.evangelion.gameboard.Sector;
-import eva.evangelion.items.Weapon.Ammo;
-import eva.evangelion.units.battle.Effect;
+import eva.evangelion.units.battle.*;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import eva.evangelion.items.Weapon.FieldItem;
@@ -30,12 +29,9 @@ import eva.evangelion.gameboard.SectorType;
 import eva.evangelion.state.GameState;
 import eva.evangelion.state.Queue;
 import eva.evangelion.state.QueuePosition;
-import eva.evangelion.units.battle.Evangelion;
 import eva.evangelion.state.QueuePosition.ReactionType;
 import eva.evangelion.units.type.EvangelionIO;
 import eva.evangelion.units.type.EvangelionType;
-import eva.evangelion.units.battle.FieldUnit;
-import eva.evangelion.units.battle.Unit;
 import eva.evangelion.view.UIElements.BetterButton;
 import eva.evangelion.util.DirectoryWatcher;
 import javafx.animation.*;
@@ -136,7 +132,7 @@ public class Game {
     private FieldUnit selectedUnit = null;
 
     // ---- Pending action for confirmation ----
-    private Action pendingAction = null;
+    private Action confirmAction = null;
 
     // ---- Sequential action processing ----
     private final List<Action> pendingActions = new ArrayList<>();
@@ -192,16 +188,14 @@ public class Game {
         updateActivePlayerDisplay();
         updateTopBarColor();
 
-        createFieldItemAt(new Ammo(), 3, 4);
-        createFieldItemAt(new Ammo(), 5, 2);
-        createFieldItemAt(new Ammo(), 7, 7);
+        FieldUnit angel = createFieldUnit("MrAngel", new Angel(), 4, 5, 1);
 
         initializeGameplay(startnew);
         initializeUnits(playernumber);
 
 
         setupBoardInteraction();
-        updateNamePanels();
+        updateDMUIScreens();
 
         startGameStateWatcher();
         loadInitialGameState();
@@ -368,6 +362,8 @@ public class Game {
             processDMChoosePlayerAction((DMChoosePlayerAction) action);
         } else if (action instanceof DMCreateUnitAction) {
             processDMCreateUnitAction((DMCreateUnitAction) action);
+        } else if (action instanceof EndRoundAction) {
+            processForcedRoundEnd((EndRoundAction) action);
         } else if (action instanceof DMDeleteUnitAction) {
             processDMDeleteUnitAction((DMDeleteUnitAction) action);
         }  else if (action instanceof createDMSetUpPopUpAction) {
@@ -380,8 +376,8 @@ public class Game {
             processInventoryItemTransferAction((InventoryItemTransferAction) action);
         } else if (action instanceof SwitchTeamAction) {
             processSwitchTeamAction((SwitchTeamAction) action);
-        } else if (action instanceof TurnEndAction) {
-            processTurnEndAction((TurnEndAction) action);
+        } else if (action instanceof EndTurnAction) {
+            processEndTurnAction((EndTurnAction) action);
         } else
         {
             LogMessage("Unknown action type: " + action.getClass().getSimpleName());
@@ -465,26 +461,111 @@ public class Game {
 
     }
 
-    private void processTurnEndAction(TurnEndAction action) {
+    private void processEndTurnAction(EndTurnAction action) {
         FieldUnit actor = getUnitFromName(action.getActor());
         if (actor == null || !actor.isExists()) {
             LogMessage("TurnEndAction failed: Actor not found: " + action.getActor());
             return;
         }
         actor.ClearEffects(Effect.EffectEnd.TURN_END);
-        actor.setTurnDone(true);                              // NEW
+        actor.setTurnDone(true);
+
         if (actor.getUnit() instanceof Evangelion) {
             processEndPlayerTurn(action);
+        } else if (actor.getUnit() instanceof Angel) {
+            processAngelTurnEnd(action);
         }
+
+        if (isRoundEnd()) processEndRound();
+        updateDMUIScreens();
     }
 
-    private void processEndPlayerTurn(TurnEndAction action) {
+    private void processAngelTurnEnd(EndTurnAction action) {
         FieldUnit actor = getUnitFromName(action.getActor());
         activateQueue(action);
         LogMessage("Turn ended for " + actor.getName()
                 + " (action #" + action.getActionNumber() + ").");
         setDMToNext();
-        CurrentTurn++;
+    }
+
+    private void processEndPlayerTurn(EndTurnAction action) {
+        FieldUnit actor = getUnitFromName(action.getActor());
+        activateQueue(action);
+        LogMessage("Turn ended for " + actor.getName()
+                + " (action #" + action.getActionNumber() + ").");
+        switch (gameMode) {
+            case CLASSIC -> {
+                resetTurn(getClassicAngel());
+                CurrentTurn++;
+                setClassicAngelToNext();
+            }
+            //TODO add handling for other gamemodes
+            default -> setDMToNext();
+        }
+    }
+
+    private void resetTurn(FieldUnit unit){
+        unit.setStamina(unit.getMaxStamina());
+        unit.setTurnDone(false);
+        unit.setATP(unit.getMaxATP());
+    }
+
+    private void processEndRound() {
+        for (FieldUnit unit : UnitList) {
+            unit.ClearEffects(Effect.EffectEnd.ROUND_END);
+            unit.setUsedGuard(false);
+        }
+        CurrentTurn = 1;
+        CurrentRound++;
+        switch (gameMode) {
+            case CLASSIC -> {
+                for (FieldUnit unit : UnitList) {
+                    if (!unit.equals(getClassicAngel())) resetTurn(unit);
+                }
+            }
+            //TODO add handling for other gamemodes
+            default -> {
+                for (FieldUnit unit : UnitList) {
+                    resetTurn(unit);
+                }
+            }
+        }
+    }
+
+    private FieldUnit getClassicAngel(){
+        for (FieldUnit unit : UnitList){
+            if (unit.getUnit() instanceof Angel) return unit;
+        }
+        return null;
+    }
+    private List<FieldUnit> getEvangelionsAndAngels(){
+        List<FieldUnit> units = new ArrayList<>();
+        for (FieldUnit unit : UnitList){
+            if (unit.getUnit() instanceof Angel || unit.getUnit() instanceof Evangelion) units.add(unit);
+        }
+        return units;
+    }
+
+
+
+    private boolean isRoundEnd(){
+        switch (gameMode) {
+            case CLASSIC -> {
+                for (FieldUnit unit : getEvangelionsAndAngels())
+                {
+                    if (!unit.isTurnDone()) return false;
+                }
+            }
+            case FFA, TEAM -> {
+                for (FieldUnit unit : UnitList) {
+                    if (!unit.isTurnDone()) return false;
+                }
+            }
+            case CUSTOM -> {
+                return false;
+            }
+        }
+        return true;
     }
 
 
@@ -573,7 +654,17 @@ public class Game {
 
     protected void setDMToNext() {
         QueuePosition nextPos = new QueuePosition("DM", false);
-        LogMessage("Adding queue position for " + nextPos.getUnitID()+ " at turn end");
+        LogMessage("Adding queue position for " + nextPos.getUnitID());
+        nextPos.setActionNumber(-1);
+        queue.addPosition(nextPos, 1);
+    }
+    protected void setClassicAngelToNext() {
+        if (!(getClassicAngel() != null && getClassicAngel().Exists)) {
+            LogMessage("NO ANGEL FOUND");
+            return;
+        }
+        QueuePosition nextPos = new QueuePosition(getClassicAngel().getName(), false);
+        LogMessage("Adding queue position for " + nextPos.getUnitID());
         nextPos.setActionNumber(-1);
         queue.addPosition(nextPos, 1);
     }
@@ -620,7 +711,13 @@ public class Game {
         queue.addPosition(next, 1);
     }
 
-    // ---- DMChoosePlayerAction execution ----
+
+    private void processForcedRoundEnd(EndRoundAction action) {
+        DMQueueInsertion(action, "ROUND_END");
+        processEndRound();
+        updateDMUIScreens();
+    }
+
 
     private void processDMCreateUnitAction(DMCreateUnitAction action) {
 
@@ -642,8 +739,8 @@ public class Game {
             }
         }
 
-        FieldUnit unit = createFieldUnit(name, action.getUnit(), x, y);
-        unit.setTeam(action.getTeam());
+        FieldUnit unit = createFieldUnit(name, action.getUnit(), x, y, action.getTeam());
+
         double visualDuration = fastActions ? 0.1 : action.getTime() / actionSpeed;
         animateCreateUnit(unit, visualDuration);
 
@@ -687,6 +784,7 @@ public class Game {
             nextPos.setActionNumber(-1);
             LogMessage("Adding queue position for " + nextPos.getUnitID() + " at DMPlayerAction");
             queue.addPosition(nextPos, 1);
+            CurrentTurn++;
         } else {
             LogMessage("DMChoosePlayerAction failed: No current queue position.");
         }
@@ -698,7 +796,7 @@ public class Game {
         List<QueuePosition> positions = queue.getQueue(); // getQueue() returns a list
         for (int i = 0; i < positions.size(); i++) {
             QueuePosition pos = positions.get(i);
-            queueOutput.append("  Position ").append(i)
+            queueOutput.append(" Position ").append(i).append(" Round = ").append(pos.getRound()).append(" Turn =").append(pos.getTurn())
                     .append(": UnitID=").append(pos.getUnitID())
                     .append(", ActionNumber=").append(pos.getActionNumber())
                     .append(", Reaction=").append(pos.isReaction());
@@ -798,10 +896,9 @@ public class Game {
         int x = action.getX();
         int y = action.getY();
         Unit unit = action.getUnit();
-        FieldUnit newUnit = createFieldUnit(playerName, unit, x, y);
-        LogMessage("Created Evangelion for " + playerName + " at (" + x + "," + y + ")");
+        FieldUnit newUnit = createFieldUnit(playerName, unit, x, y, action.getTeam());
 
-        addUnitToTeam(newUnit, action.getTeam());
+        LogMessage("Created Evangelion for " + playerName + " at (" + x + "," + y + ")");
 
         List<QueuePosition> positions = queue.getQueue();
         if (positions.isEmpty()) {
@@ -839,28 +936,21 @@ public class Game {
         return null;
     }
 
-    public FieldUnit createFieldUnit(String name, Unit unit, int x, int y) {
+    public FieldUnit createFieldUnit(String name, Unit unit, int x, int y, int team) {
         FieldUnit newUnit = new FieldUnit(name, unit, x, y);
         UnitList.add(newUnit);
         refreshUnitPositions();
-        updateNamePanels();
+        addUnitToTeam(newUnit, team);
+        updateDMUIScreens();
         return newUnit;
     }
 
     public void removeFieldUnit(FieldUnit unit) {
         unit.setExists(false);
         refreshUnitPositions();
-        updateNamePanels();
+        updateDMUIScreens();
     }
 
-    protected void updateNamePanels(){
-        if (turnChoicePanel != null) {
-            updateTurnChoiceUI(turnChoicePanel);
-        }
-        if (namePanel != null) {
-            updateNameSelectionUI(namePanel);
-        }
-    }
 
 
     private FieldUnit getUnitAt(int x, int y) {
@@ -956,10 +1046,10 @@ public class Game {
                 return;
             }
 
-            pendingAction = new MoveAction(currentActionNumber, selectedUnit.getName(),
+            confirmAction = new MoveAction(currentActionNumber, selectedUnit.getName(),
                     x - selectedUnit.getX(), y - selectedUnit.getY());
 
-            createConfirmButton(pendingAction, Color.DARKORANGE,"Move to ("+x+","+y+")");
+            createConfirmButton(confirmAction, Color.DARKORANGE,"Move to ("+x+","+y+")");
             LocalMessage("Move pending. Click Confirm to send.");
         } else {
             LocalMessage("No unit selected. Click on a unit to select it.");
@@ -1024,7 +1114,7 @@ public class Game {
         proceedBtn.setSuccessStyle();
         proceedBtn.setOnAction(e -> {
             SendAction(action);
-            pendingAction = null;
+            confirmAction = null;
             confirmContainer.getChildren().clear();
             popupStage.close();
         });
@@ -1087,7 +1177,7 @@ public class Game {
         }
 
         // ----- Build and confirm the action -----
-        TurnEndAction action = new TurnEndAction(currentActionNumber, currentPlayer);
+        EndTurnAction action = new EndTurnAction(currentActionNumber, currentPlayer);
         showConfirmPopup(action, Color.GRAY, description);
     }
 
@@ -1153,6 +1243,12 @@ public class Game {
                 output.appendText("Sent DMCreateUnitAction for '" + name + "' at ("
                         + x + ", " + y + ") team=" + team + ".\n");
                 break;
+            case "round":
+                EndRoundAction action1 = new EndRoundAction(
+                        currentActionNumber, "DM");
+                SendAction(action1);
+                output.appendText("Sent Round end action");
+                break;
             case "team":
                 // team <name> <teamNumber>
                 if (parts.length < 3) {
@@ -1184,7 +1280,7 @@ public class Game {
             case "showallunits":
                 showAllUnits = !showAllUnits;
                 output.appendText("showAllUnits = " + showAllUnits + "\n");
-                updateNamePanels();
+                updateDMUIScreens();
                 break;
             case "actions":
                     output.appendText(outputActions());
@@ -1292,6 +1388,7 @@ public class Game {
                 output.appendText("  help                   – shows this help\n");
                 output.appendText("  team <name> <teamNumber> – switches a unit to another team\n");
                 output.appendText("  /showAllUnits          – toggle showing finished units in the next-turn list\n");
+                output.appendText("  round                  – Ends the round forcefully\n");
                 break;
 
             default:
@@ -1890,24 +1987,52 @@ public class Game {
 
         // ---- Listeners for unit list changes ----
         UnitList.addListener((ListChangeListener<FieldUnit>) change -> {
-            if (namePanel != null) {
-                updateNameSelectionUI(namePanel);
-            }
-            if (turnChoicePanel != null) {
-                updateTurnChoiceUI(turnChoicePanel);
-            }
+            updateDMUIScreens();
         });
 
         return wrapper;
     }
 
-    // ---- Updated LogMessage to use the message log panel ----
-    public void LogMessage(String msg) {
-        System.out.println("Log " + msg);
-        if (msgLogOutput != null) {
-            msgLogOutput.appendText(msg + "\n");
+    public void updateDMUIScreens(){
+        if (namePanel != null) {
+            updateNameSelectionUI(namePanel);
+        }
+        if (turnChoicePanel != null) {
+            updateTurnChoiceUI(turnChoicePanel);
         }
     }
+
+
+    // ---- Updated LogMessage to use the message log panel ----
+    private static final int MAX_LOG_LINES = 200;
+
+    public void LogMessage(String msg) {
+        System.out.println("Log " + msg);
+        if (msgLogOutput == null) return;
+
+        msgLogOutput.appendText(msg + "\n");
+
+        // Trim if we exceed the cap
+        String text = msgLogOutput.getText();
+        long lineCount = text.chars().filter(c -> c == '\n').count();
+        if (lineCount > MAX_LOG_LINES) {
+            int cut = (int) (lineCount - MAX_LOG_LINES);
+            int idx = 0;
+            for (int i = 0; i < cut; i++) {
+                idx = text.indexOf('\n', idx) + 1;
+                if (idx <= 0) { idx = 0; break; }
+            }
+            String trimmed = text.substring(idx);
+            msgLogOutput.setText(trimmed);
+            msgLogOutput.positionCaret(trimmed.length());
+        } else {
+            // Auto-scroll to bottom
+            msgLogOutput.positionCaret(text.length());
+        }
+    }
+
+
+
 
     // ---- Helper: find TextField in a VBox (used for namePanel) ----
     private TextField findNameField(VBox panel) {
@@ -2150,16 +2275,16 @@ public class Game {
                         Arrow.ArrowType.PREVIEW);
                 arrows.add(arrow);
             }
-            pendingAction = InventoryItemTransferAction.pickUpAction(currentActionNumber, currentPlayer,
+            confirmAction = InventoryItemTransferAction.pickUpAction(currentActionNumber, currentPlayer,
                     ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(toSlot), draggedFromField.getX()- evaUnit.getX(),
                     draggedFromField.getY() - evaUnit.getY());
             s = "Picking up "+item.getName()+" from ("+draggedFromField.getX()+","+draggedFromField.getY()+") with "+toSlot.getName();
         } else {
-            pendingAction = InventoryItemTransferAction.InventorySwitch(currentActionNumber, currentPlayer,
+            confirmAction = InventoryItemTransferAction.InventorySwitch(currentActionNumber, currentPlayer,
                     ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(fromSlot), ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(toSlot));
             s = "Putting "+item.getName()+" from "+fromSlot.getName()+" to "+toSlot.getName();
         }
-        createConfirmButton(pendingAction, Color.BLACK, s);
+        createConfirmButton(confirmAction, Color.BLACK, s);
     }
 
     private void onDraggingItemToBattlefield(Item item, Slot fromSlot, int x, int y, Node targetCell) {
@@ -2178,10 +2303,10 @@ public class Game {
                     Arrow.ArrowType.PREVIEW);
             arrows.add(arrow);
         }
-        pendingAction = InventoryItemTransferAction.dropAction(currentActionNumber, currentPlayer,
+        confirmAction = InventoryItemTransferAction.dropAction(currentActionNumber, currentPlayer,
                 ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(fromSlot), x- evaUnit.getX(), y- evaUnit.getY());
 
-        createConfirmButton(pendingAction, Color.BLACK, "Dropping "+item.getName()+" from "+fromSlot.getName()+" to "+CordsToText(x, y));
+        createConfirmButton(confirmAction, Color.BLACK, "Dropping "+item.getName()+" from "+fromSlot.getName()+" to "+CordsToText(x, y));
     }
 
     public String CordsToText(int x, int y) {
@@ -2271,7 +2396,7 @@ public class Game {
 
 
     private void rebuildInventoryTab() {
-        LogMessage("Rebuilding Inventory Tab");
+        LogMessage("Attempting to rebuild inventory tab");
         inventoryTab.getChildren().clear();
         FieldUnit unit = getUnitFromName(currentPlayer);
         if (unit == null || !(unit.getUnit() instanceof Evangelion)) {
@@ -2734,11 +2859,20 @@ public class Game {
         moveContent.setAlignment(Pos.TOP_LEFT);
         Label moveLabel = new Label("Move Actions");
         moveLabel.setStyle("-fx-font-weight: bold;");
+        BetterButton allBtn = new BetterButton("All Options");
+        allBtn.setPrimaryStyle();
         BetterButton runBtn = new BetterButton("Run");
         runBtn.setPrimaryStyle();
         BetterButton maneuverBtn = new BetterButton("Maneuver");
         maneuverBtn.setPrimaryStyle();
-        moveContent.getChildren().addAll(moveLabel, runBtn, maneuverBtn);
+        BetterButton coverBtn = new BetterButton("Cover");
+        coverBtn.setPrimaryStyle();
+        BetterButton tacticalBtn = new BetterButton("Tactical");
+        tacticalBtn.setPrimaryStyle();
+        BetterButton repositionBtn = new BetterButton("Reposition");
+        repositionBtn.setPrimaryStyle();
+
+        moveContent.getChildren().addAll(moveLabel, runBtn, maneuverBtn, coverBtn, repositionBtn);
 
         // Attack section
         VBox attackContent = new VBox(8);
@@ -2993,6 +3127,8 @@ public class Game {
         board.UpdateBoardColors();
         return board;
     }
+
+
 
     private void updateSliderRanges() {
         double viewWidth = viewport.getPrefWidth();
