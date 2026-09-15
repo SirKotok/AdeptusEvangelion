@@ -71,6 +71,7 @@ public class Game {
     private GameState.GAME_MODE gameMode = GameState.GAME_MODE.CLASSIC;
     private boolean showAllUnits = false;
 
+
     private final Stage stage;
     private GameBoard gameBoard;          // reference to the main board
     private Item draggedItem;            // item being dragged
@@ -2717,8 +2718,16 @@ public class Game {
         wrapper.getChildren().addAll(title, chatArea, inputRow);
         return wrapper;
     }
-    private HBox bottomPanel;
-    private double bottomPanelHeight = 150;
+
+    // ---- Bottom panel ----
+    private Pane bottomPanel;
+    public double bottomPanelHeight = 150;
+    private ScrollableContainer buttonScrollContainer;
+    private ScrollableContainer moveScrollContainer;
+    private ScrollableContainer attackScrollContainer;
+    private ScrollableContainer atPowerScrollContainer;
+    private ScrollableContainer otherScrollContainer;
+
     // ---- Battlefield tab ----
     private VBox buildBattlefieldTab() {
         VBox wrapper = new VBox(10);
@@ -2816,127 +2825,219 @@ public class Game {
             vSlider.setValue(newV);
         });
 
-        // --- NEW: bottom menu panel ---
-        bottomPanel = new HBox(15);
-        bottomPanel.setPadding(new Insets(10, 5, 5, 5));
-        bottomPanel.setAlignment(Pos.CENTER_LEFT);
-        bottomPanel.setStyle("-fx-background-color: #3a3a3a; -fx-border-color: #555; -fx-border-width: 1 0 0 0;");
-        bottomPanel.setMinHeight(0);               // allow shrinking
+        // ============================================================
+        //   BOTTOM PANEL — Pane holding ScrollableContainers
+        //   Ratios (relative to the Pane):
+        //     Buttons  : left = 0.01, width = 0.20
+        //     Contents : left = 0.21, width = 0.78
+        //   Top / height of the Pane changes with the Options slider, which
+        //   raises the top edge up while growing the height by the same
+        //   amount (the bottom edge is pinned by the BorderPane).
+        // ============================================================
+        bottomPanel = new Pane();
+        bottomPanel.setStyle("-fx-background-color: #3a3a3a; " +
+                "-fx-border-color: #555; -fx-border-width: 1 0 0 0;");
+        bottomPanel.setMinHeight(0);
         bottomPanel.setPrefHeight(bottomPanelHeight);
         bottomPanel.setMaxHeight(bottomPanelHeight);
 
-        // Left: vertical buttons
-        VBox buttonBox = new VBox(8);
-        buttonBox.setAlignment(Pos.TOP_LEFT);
-        buttonBox.setPadding(new Insets(5));
-        buttonBox.setMinHeight(0);
+        // ----- Buttons container (left = 0.01, width = 0.2) -----
+        buttonScrollContainer = new ScrollableContainer(
+                0.01, 0.20, 0.02, 0.96, false, false);
+        buttonScrollContainer.setContainerPadding(new Insets(5));
+        buttonScrollContainer.setSpacing(8);
+        buttonScrollContainer.setBackgroundColor(Color.rgb(40, 40, 40, 0.95), true); // dark charcoal
+        buttonScrollContainer.setBorderStyle(
+                "-fx-border-color: #888; -fx-border-width: 1; -fx-border-radius: 4;");
+        buttonScrollContainer.setFitToHeight(true);
+        buttonScrollContainer.setStyle(
+                "-fx-background: rgba(40,40,40,0.950000);" +
+                        "-fx-background-color: rgba(40,40,40,0.950000);" +
+                        "-fx-background-insets: 0;");
 
+// ----- Move container — warm yellow -----
+        moveScrollContainer = new ScrollableContainer(
+                0.21, 0.78, 0.02, 0.96, false, false);
+        moveScrollContainer.setContainerPadding(new Insets(10));
+        moveScrollContainer.setSpacing(8);
+        moveScrollContainer.setBackgroundColor(Color.rgb(255, 244, 200, 0.95), true); // pale goldenrod
+        moveScrollContainer.setBorderStyle(
+                "-fx-border-color: #d4a017; -fx-border-width: 2; -fx-border-radius: 4;");
+        moveScrollContainer.setFitToHeight(true);
+        moveScrollContainer.setStyle(
+                "-fx-background: rgba(255,244,200,0.950000);" +
+                        "-fx-background-color: rgba(255,244,200,0.950000);" +
+                        "-fx-background-insets: 0;");
+
+// ----- Attack container — warm red -----
+        attackScrollContainer = new ScrollableContainer(
+                0.21, 0.78, 0.02, 0.96, false, false);
+        attackScrollContainer.setContainerPadding(new Insets(10));
+        attackScrollContainer.setSpacing(8);
+        attackScrollContainer.setBackgroundColor(Color.rgb(255, 220, 220, 0.95), true); // pale red
+        attackScrollContainer.setBorderStyle(
+                "-fx-border-color: #8b0000; -fx-border-width: 2; -fx-border-radius: 4;");
+        attackScrollContainer.setFitToHeight(true);
+        attackScrollContainer.setStyle(
+                "-fx-background: rgba(255,220,220,0.950000);" +
+                        "-fx-background-color: rgba(255,220,220,0.950000);" +
+                        "-fx-background-insets: 0;");
+
+// ----- ATPower container — cool blue -----
+        atPowerScrollContainer = new ScrollableContainer(
+                0.21, 0.78, 0.02, 0.96, false, false);
+        atPowerScrollContainer.setContainerPadding(new Insets(10));
+        atPowerScrollContainer.setSpacing(8);
+        atPowerScrollContainer.setBackgroundColor(Color.rgb(215, 235, 255, 0.95), true); // pale steel blue
+        atPowerScrollContainer.setBorderStyle(
+                "-fx-border-color: #1e5f8f; -fx-border-width: 2; -fx-border-radius: 4;");
+        atPowerScrollContainer.setFitToHeight(true);
+        atPowerScrollContainer.setStyle(
+                "-fx-background: rgba(215,235,255,0.950000);" +
+                        "-fx-background-color: rgba(215,235,255,0.950000);" +
+                        "-fx-background-insets: 0;");
+
+// ----- Other container — neutral gray -----
+        otherScrollContainer = new ScrollableContainer(
+                0.21, 0.78, 0.02, 0.96, false, false);
+        otherScrollContainer.setContainerPadding(new Insets(10));
+        otherScrollContainer.setSpacing(8);
+        otherScrollContainer.setBackgroundColor(Color.rgb(235, 235, 235, 0.95), true); // light gray
+        otherScrollContainer.setBorderStyle(
+                "-fx-border-color: #555555; -fx-border-width: 2; -fx-border-radius: 4;");
+        otherScrollContainer.setFitToHeight(true);
+        otherScrollContainer.setStyle(
+                "-fx-background: rgba(235,235,235,0.950000);" +
+                        "-fx-background-color: rgba(235,235,235,0.950000);" +
+                        "-fx-background-insets: 0;");
+
+        // ----- Add to the Pane and bind each to the Pane's size -----
+        bottomPanel.getChildren().addAll(
+                buttonScrollContainer,
+                moveScrollContainer, attackScrollContainer,
+                atPowerScrollContainer, otherScrollContainer);
+
+        buttonScrollContainer.bindToRegion(bottomPanel);
+        moveScrollContainer.bindToRegion(bottomPanel);
+        attackScrollContainer.bindToRegion(bottomPanel);
+        atPowerScrollContainer.bindToRegion(bottomPanel);
+        otherScrollContainer.bindToRegion(bottomPanel);
+
+        // ----- Populate the buttons container -----
         BetterButton moveBtn = new BetterButton("Move");
         moveBtn.setPrimaryStyle();
-        moveBtn.setPrefWidth(100);
+        moveBtn.setMaxWidth(Double.MAX_VALUE);
+
         BetterButton attackBtn = new BetterButton("Attack");
         attackBtn.setPrimaryStyle();
-        attackBtn.setPrefWidth(100);
+        attackBtn.setMaxWidth(Double.MAX_VALUE);
+
         BetterButton atPowerBtn = new BetterButton("ATPowers");
         atPowerBtn.setPrimaryStyle();
-        atPowerBtn.setPrefWidth(100);
+        atPowerBtn.setMaxWidth(Double.MAX_VALUE);
+
         BetterButton otherBtn = new BetterButton("Other");
         otherBtn.setPrimaryStyle();
-        otherBtn.setPrefWidth(100);
+        otherBtn.setMaxWidth(Double.MAX_VALUE);
 
-        buttonBox.getChildren().addAll(moveBtn, attackBtn, atPowerBtn, otherBtn);
+        buttonScrollContainer.addNode(moveBtn);
+        buttonScrollContainer.addNode(attackBtn);
+        buttonScrollContainer.addNode(atPowerBtn);
+        buttonScrollContainer.addNode(otherBtn);
 
-        // Right: content stack
-        StackPane contentStack = new StackPane();
-        contentStack.setPadding(new Insets(5));
-        HBox.setHgrow(contentStack, Priority.ALWAYS);
-        contentStack.setMinHeight(0);
-        // --- Section panes ---
-        // Move section
-        VBox moveContent = new VBox(8);
-        moveContent.setPadding(new Insets(10));
-        moveContent.setStyle("-fx-background-color: #FFFACD; -fx-border-color: #ccc;");
-        moveContent.setAlignment(Pos.TOP_LEFT);
+        // ----- Populate Move content -----
         Label moveLabel = new Label("Move Actions");
-        moveLabel.setStyle("-fx-font-weight: bold;");
-        BetterButton allBtn = new BetterButton("All Options");
-        allBtn.setPrimaryStyle();
+        moveLabel.setStyle(
+                "-fx-font-weight: bold;" +
+                        "-fx-font-size: 14px;" +
+                        "-fx-text-fill: #8a6800;" +            // dark goldenrod
+                        "-fx-padding: 0 0 4 0;"
+        );
+        moveScrollContainer.addNode(moveLabel);
+
         BetterButton runBtn = new BetterButton("Run");
         runBtn.setPrimaryStyle();
+        runBtn.setMaxWidth(Double.MAX_VALUE);
+        moveScrollContainer.addNode(runBtn);
+
         BetterButton maneuverBtn = new BetterButton("Maneuver");
         maneuverBtn.setPrimaryStyle();
+        maneuverBtn.setMaxWidth(Double.MAX_VALUE);
+        moveScrollContainer.addNode(maneuverBtn);
+
         BetterButton coverBtn = new BetterButton("Cover");
         coverBtn.setPrimaryStyle();
-        BetterButton tacticalBtn = new BetterButton("Tactical");
-        tacticalBtn.setPrimaryStyle();
+        coverBtn.setMaxWidth(Double.MAX_VALUE);
+        moveScrollContainer.addNode(coverBtn);
+
         BetterButton repositionBtn = new BetterButton("Reposition");
         repositionBtn.setPrimaryStyle();
+        repositionBtn.setMaxWidth(Double.MAX_VALUE);
+        moveScrollContainer.addNode(repositionBtn);
 
-        moveContent.getChildren().addAll(moveLabel, runBtn, maneuverBtn, coverBtn, repositionBtn);
-
-        // Attack section
-        VBox attackContent = new VBox(8);
-        attackContent.setPadding(new Insets(10));
-        attackContent.setStyle("-fx-background-color: #FFCCCC; -fx-border-color: #ccc;");
-        attackContent.setAlignment(Pos.TOP_LEFT);
+        // ----- Populate Attack content -----
         Label attackLabel = new Label("Attack Actions");
-        attackLabel.setStyle("-fx-font-weight: bold;");
-        attackContent.getChildren().add(attackLabel);  // no buttons yet
+        attackLabel.setStyle(
+                "-fx-font-weight: bold;" +
+                        "-fx-font-size: 14px;" +
+                        "-fx-text-fill: #8b0000;" +            // dark red
+                        "-fx-padding: 0 0 4 0;"
+        );
+        attackScrollContainer.addNode(attackLabel);
 
-        // AT Power section
-        VBox atPowerContent = new VBox(8);
-        atPowerContent.setPadding(new Insets(10));
-        atPowerContent.setStyle("-fx-background-color: #CCE5FF; -fx-border-color: #ccc;");
-        atPowerContent.setAlignment(Pos.TOP_LEFT);
+        // ----- Populate AT Power content -----
         Label atPowerLabel = new Label("AT Powers");
-        atPowerLabel.setStyle("-fx-font-weight: bold;");
-        atPowerContent.getChildren().add(atPowerLabel);
+        atPowerLabel.setStyle(
+                "-fx-font-weight: bold;" +
+                        "-fx-font-size: 14px;" +
+                        "-fx-text-fill: #1e5f8f;" +            // steel blue
+                        "-fx-padding: 0 0 4 0;"
+        );
+        atPowerScrollContainer.addNode(atPowerLabel);
 
-        // Other section
-        VBox otherContent = new VBox(8);
-        otherContent.setPadding(new Insets(10));
-        otherContent.setStyle("-fx-background-color: #f0f0f0; -fx-border-color: #ccc;");
-        otherContent.setAlignment(Pos.TOP_LEFT);
+        // ----- Populate Other content -----
         Label otherLabel = new Label("Other Actions");
-        otherLabel.setStyle("-fx-font-weight: bold;");
-        otherContent.getChildren().add(otherLabel);
+        otherLabel.setStyle(
+                "-fx-font-weight: bold;" +
+                        "-fx-font-size: 14px;" +
+                        "-fx-text-fill: #333333;" +            // dark gray
+                        "-fx-padding: 0 0 4 0;"
+        );
+        otherScrollContainer.addNode(otherLabel);
 
-        // Add all to stack, initially only Move visible
-        contentStack.getChildren().addAll(moveContent, attackContent, atPowerContent, otherContent);
-        moveContent.setVisible(true);
-        attackContent.setVisible(false);
-        atPowerContent.setVisible(false);
-        otherContent.setVisible(false);
+        // ----- Only one content container visible at a time -----
+        moveScrollContainer.setVisible(true);
+        attackScrollContainer.setVisible(false);
+        atPowerScrollContainer.setVisible(false);
+        otherScrollContainer.setVisible(false);
 
-        // --- Button actions ---
+        // ----- Toggle buttons switch the visible content container -----
         moveBtn.setOnAction(e -> {
-            moveContent.setVisible(true);
-            attackContent.setVisible(false);
-            atPowerContent.setVisible(false);
-            otherContent.setVisible(false);
+            moveScrollContainer.setVisible(true);
+            attackScrollContainer.setVisible(false);
+            atPowerScrollContainer.setVisible(false);
+            otherScrollContainer.setVisible(false);
         });
         attackBtn.setOnAction(e -> {
-            moveContent.setVisible(false);
-            attackContent.setVisible(true);
-            atPowerContent.setVisible(false);
-            otherContent.setVisible(false);
+            moveScrollContainer.setVisible(false);
+            attackScrollContainer.setVisible(true);
+            atPowerScrollContainer.setVisible(false);
+            otherScrollContainer.setVisible(false);
         });
         atPowerBtn.setOnAction(e -> {
-            moveContent.setVisible(false);
-            attackContent.setVisible(false);
-            atPowerContent.setVisible(true);
-            otherContent.setVisible(false);
+            moveScrollContainer.setVisible(false);
+            attackScrollContainer.setVisible(false);
+            atPowerScrollContainer.setVisible(true);
+            otherScrollContainer.setVisible(false);
         });
         otherBtn.setOnAction(e -> {
-            moveContent.setVisible(false);
-            attackContent.setVisible(false);
-            atPowerContent.setVisible(false);
-            otherContent.setVisible(true);
+            moveScrollContainer.setVisible(false);
+            attackScrollContainer.setVisible(false);
+            atPowerScrollContainer.setVisible(false);
+            otherScrollContainer.setVisible(true);
         });
 
-        bottomPanel.getChildren().addAll(buttonBox, contentStack);
-
-        // --- Main layout: title + scrollContainer + bottomPanel ---
+        // ----- Main layout -----
         battlePane = new BorderPane();
         battlePane.setCenter(scrollContainer);
         battlePane.setBottom(bottomPanel);

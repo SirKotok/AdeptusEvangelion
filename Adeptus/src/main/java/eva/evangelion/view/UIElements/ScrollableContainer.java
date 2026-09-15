@@ -4,6 +4,7 @@ import javafx.geometry.Insets;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.ScrollPane;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 
@@ -88,6 +89,19 @@ public class ScrollableContainer extends ScrollPane {
         }
     }
 
+
+    public void bindToRegion(Region region) {
+        layoutXProperty().unbind();
+        layoutYProperty().unbind();
+        prefWidthProperty().unbind();
+        prefHeightProperty().unbind();
+
+        layoutXProperty().bind(region.widthProperty().multiply(leftMarginRatio));
+        prefWidthProperty().bind(region.widthProperty().multiply(widthRatio));
+        layoutYProperty().bind(region.heightProperty().multiply(topMarginRatio));
+        prefHeightProperty().bind(region.heightProperty().multiply(heightRatio));
+    }
+
     private void bindToScene(Scene scene) {
         if (!bindToScene) return;   // NEW: skip binding if flag is false
 
@@ -122,10 +136,25 @@ public class ScrollableContainer extends ScrollPane {
         setContainerPadding(new Insets(top, right, bottom, left));
     }
 
-    public void setBackgroundColor(Color color) {
+    public void setBackgroundColor(Color color, boolean change) {
         this.backgroundColor = color;
         applyVBoxStyle();
+            if (change) {
+            if (color == null || color == Color.TRANSPARENT) {
+                setStyle("-fx-background: transparent; -fx-background-color: transparent;");
+            } else {
+                String css = toCssColor(color);
+                setStyle(
+                        "-fx-background: " + css + ";" +
+                                "-fx-background-color: " + css + ";"
+                    );
+                }
+            }
+        }
+    public void setBackgroundColor(Color color) {
+        setBackgroundColor(color, false);
     }
+
 
     public void setBorderStyle(String cssBorder) {
         this.borderStyle = cssBorder;

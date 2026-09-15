@@ -152,8 +152,12 @@ public class WeaponCreatorUI extends Pane {
         customContainer = createContainer(CUSTOM_CONTAINER_LEFT, CUSTOM_CONTAINER_WIDTH, CUSTOM_CONTAINER_TOP, CUSTOM_CONTAINER_HEIGHT);
         actionContainer = createContainer(ACTION_CONTAINER_LEFT, ACTION_CONTAINER_WIDTH, ACTION_CONTAINER_TOP, ACTION_CONTAINER_HEIGHT);
         descriptionContainer = createContainer(DESCRIPTION_CONTAINER_LEFT, DESCRIPTION_CONTAINER_WIDTH, DESCRIPTION_CONTAINER_TOP, DESCRIPTION_CONTAINER_HEIGHT);
-        // Existing stats and icon containers (also using constants)
         statsScrollContainer = createContainer(STATS_CONTAINER_LEFT, STATS_CONTAINER_WIDTH, STATS_CONTAINER_TOP, STATS_CONTAINER_HEIGHT);
+
+
+
+
+
         ScrollableContainer iconScrollContainer = createContainer(ICON_CONTAINER_LEFT, ICON_CONTAINER_WIDTH, ICON_CONTAINER_TOP, ICON_CONTAINER_HEIGHT);
 
         inputContainer.setContainerPadding(new Insets(10));
@@ -592,6 +596,7 @@ public class WeaponCreatorUI extends Pane {
     }
     private ScrollableContainer createContainer(double left, double width, double top, double height) {
         ScrollableContainer container = new ScrollableContainer(left, width, top, height);
+        container.setFitToHeight(true);
         container.setContainerPadding(new Insets(10));
         container.setSpacing(5);
         container.setBackgroundColor(Color.rgb(255, 255, 255, 0.95));

@@ -6,33 +6,32 @@ public class MoveAction extends Action{
     public int deltaX;
     public int deltaY;
 
+    public enum MOVEMENTTYPE {
+        RUN,
+        COVER,
+        REPOSITION,
+        TACTICAL,
+        MANEUVER
+    }
+
+    // NEW: which movement subtype this action represents (default RUN)
+    private MOVEMENTTYPE movementType = MOVEMENTTYPE.RUN;
+
     public MoveAction(int actionNumber, String actor, int deltax, int deltay) {
         super(actionNumber, actor);
         deltaX = deltax;
         deltaY = deltay;
     }
 
-    public int getDeltaX() {
-        return deltaX;
-    }
+    public MOVEMENTTYPE getMovementType() { return movementType; }
+    public void setMovementType(MOVEMENTTYPE movementType) { this.movementType = movementType; }
 
-    public int getDeltaY() {
-        return deltaY;
-    }
+    public int getDeltaX() { return deltaX; }
+    public int getDeltaY() { return deltaY; }
 
-    public boolean canTriggerAtkofOp() {
-        return canTriggerAtkofOp;
-    }
+    public boolean canTriggerAtkofOp() { return canTriggerAtkofOp; }
+    public void setCanTriggerAtkofOp(boolean canTriggerAtkofOp) { this.canTriggerAtkofOp = canTriggerAtkofOp; }
 
-    public void setCanTriggerAtkofOp(boolean canTriggerAtkofOp) {
-        this.canTriggerAtkofOp = canTriggerAtkofOp;
-    }
-
-    public void setDeltaX(int deltaX) {
-        this.deltaX = deltaX;
-    }
-
-    public void setDeltaY(int deltaY) {
-        this.deltaY = deltaY;
-    }
+    public void setDeltaX(int deltaX) { this.deltaX = deltaX; }
+    public void setDeltaY(int deltaY) { this.deltaY = deltaY; }
 }

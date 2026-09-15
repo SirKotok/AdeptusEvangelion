@@ -8,6 +8,9 @@ public class Action implements Serializable {
     public double time = 0.5d;
     public final int ActionNumber;
     public final String actor;
+    public int staminaCost = 0;
+    public int ATPCost = 0;
+
 
     public Action(int actionNumber, String actor) {
         ActionNumber = actionNumber;

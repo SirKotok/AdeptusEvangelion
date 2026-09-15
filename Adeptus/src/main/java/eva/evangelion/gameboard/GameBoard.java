@@ -122,6 +122,9 @@ public class GameBoard {
     }
 
 
+    public boolean isCover(Sector sector) {
+        return false;
+    }
 
     public boolean SupportCheck(Sector sector) {
         return sector.getType().SupportStructure;
