@@ -4,6 +4,9 @@ import eva.evangelion.gameboard.Battlefield;
 import eva.evangelion.gameboard.GameBoard;
 import eva.evangelion.gameboard.Sector;
 import eva.evangelion.items.Weapon.Ammo;
+import eva.evangelion.units.battle.Effect;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import eva.evangelion.items.Weapon.FieldItem;
 import eva.evangelion.state.actions.*;
 import eva.evangelion.view.UIElements.ScrollableContainer;
@@ -40,6 +43,7 @@ import javafx.application.Platform;
 import javafx.beans.property.DoubleProperty;
 import javafx.beans.property.SimpleDoubleProperty;
 import javafx.stage.Modality;
+import javafx.stage.StageStyle;
 import javafx.util.Duration;
 import eva.evangelion.view.shape.Arrow;
 import javafx.beans.property.BooleanProperty;
@@ -350,10 +354,8 @@ public class Game {
     // ---- processAction: handles both MoveAction and DMChoosePlayerAction ----
     private void processAction(Action action) {
         if (action instanceof MoveAction) {
-            LogMessage("PROCESSING MOVEMENT ACTION");
             processMoveAction((MoveAction) action);
         } else if (action instanceof DMChoosePlayerAction) {
-            LogMessage("PROCESSING DM CHOOSE PLAYER ACTION");
             processDMChoosePlayerAction((DMChoosePlayerAction) action);
         } else if (action instanceof DMCreateUnitAction) {
             processDMCreateUnitAction((DMCreateUnitAction) action);
@@ -367,6 +369,8 @@ public class Game {
             processPLAYERCreateEvangelion((PLAYERCreateEvangelionAction) action);
         } else if (action instanceof InventoryItemTransferAction) {
             processInventoryItemTransferAction((InventoryItemTransferAction) action);
+        } else if (action instanceof TurnEndAction) {
+            processTurnEndAction((TurnEndAction) action);
         } else
         {
             LogMessage("Unknown action type: " + action.getClass().getSimpleName());
@@ -436,6 +440,28 @@ public class Game {
 
 
     }
+
+    private void processTurnEndAction(TurnEndAction action) {
+        FieldUnit actor = getUnitFromName(action.getActor());
+        if (actor == null || !actor.isExists()) {
+            LogMessage("TurnEndAction failed: Actor not found: " + action.getActor());
+            return;
+        }
+        actor.ClearEffects(Effect.EffectEnd.TURN_END);
+        if (actor.getUnit() instanceof Evangelion) {
+            processEndPlayerTurn(action);
+        }
+    }
+
+    private void processEndPlayerTurn(TurnEndAction action) {
+        FieldUnit actor = getUnitFromName(action.getActor());
+        activateQueue(action);
+        LogMessage("Turn ended for " + actor.getName()
+                + " (action #" + action.getActionNumber() + ").");
+        setDMToNext();
+        CurrentTurn++;
+    }
+
 
     private void processInventoryItemTransferAction(InventoryItemTransferAction action) {
 
@@ -520,12 +546,17 @@ public class Game {
 
 
 
-
+    protected void setDMToNext() {
+        QueuePosition nextPos = new QueuePosition("DM", false);
+        LogMessage("Adding queue position for " + nextPos.getUnitID()+ " at turn end");
+        nextPos.setActionNumber(-1);
+        queue.addPosition(nextPos, 1);
+    }
 
 
     protected void setActorToNext(Action action) {
         QueuePosition nextPos = new QueuePosition(action.getActor(), false);
-        LogMessage("Adding queue position for " + nextPos.getUnitID()+ " at movement");
+        LogMessage("Adding queue position for " + nextPos.getUnitID()+ " at action#"+action.getActionNumber());
         nextPos.setActionNumber(-1);
         queue.addPosition(nextPos, 1);
     }
@@ -724,8 +755,6 @@ public class Game {
     }
 
     private void processPLAYERCreateEvangelion(PLAYERCreateEvangelionAction action) {
-        // This action is sent by the player from the PLAYER_SETUP pop-up.
-        // The current position should be the player's reaction turn.
         QueuePosition current = getCurrentPosition();
         if (current != null && current.Reaction && current.getReactionType() == ReactionType.PLAYER_SETUP) {
             activateQueue(action);
@@ -733,19 +762,17 @@ public class Game {
             LogMessage("Warning: PLAYERCreateEvangelionAction processed but current position is not PLAYER_SETUP reaction.");
         }
 
-
-        // Create the unit on the battlefield
-        String playerName = action.getActor(); // actor is the player name
+        String playerName = action.getActor();
         int x = action.getX();
         int y = action.getY();
         Unit unit = action.getUnit();
         FieldUnit newUnit = createFieldUnit(playerName, unit, x, y);
         LogMessage("Created Evangelion for " + playerName + " at (" + x + "," + y + ")");
 
-        // Check if queue is now empty
+        addUnitToTeam(newUnit, action.getTeam());
+
         List<QueuePosition> positions = queue.getQueue();
         if (positions.isEmpty()) {
-            // Add a normal DM turn at the front
             QueuePosition dmTurn = new QueuePosition("DM", false);
             dmTurn.setActionNumber(-1);
             addPositionAfterCurrent(dmTurn);
@@ -753,6 +780,9 @@ public class Game {
         }
         if (playerName.equals(currentPlayer)) rebuildInventoryTab();
 
+    }
+
+    private void addUnitToTeam(FieldUnit newUnit, int team) {
     }
 
 
@@ -894,35 +924,152 @@ public class Game {
             pendingAction = new MoveAction(currentActionNumber, selectedUnit.getName(),
                     x - selectedUnit.getX(), y - selectedUnit.getY());
 
-            createConfirmButton(pendingAction);
+            createConfirmButton(pendingAction, Color.DARKORANGE,"Move to ("+x+","+y+")");
             LocalMessage("Move pending. Click Confirm to send.");
         } else {
             LocalMessage("No unit selected. Click on a unit to select it.");
         }
     }
 
-    // ============================================================
-    //   CONFIRM BUTTON ON TOP BAR
-    // ============================================================
 
-    private void createConfirmButton(Action action) {
+
+    // ============================================================
+//   CONFIRM BUTTON AND END TURN BUTTON ON TOP BAR (with confirmation pop-up)
+// ============================================================
+    private HBox turnEndContainer;   // holds the "Turn End" button
+
+
+
+
+    private void createConfirmButton(Action action, Color color, String description) {
         confirmContainer.getChildren().clear();
+
         BetterButton confirmBtn = new BetterButton("Confirm");
-        confirmBtn.setSuccessStyle();
         confirmBtn.setPrefHeight(10);
-        confirmBtn.setOnAction(e -> {
+        // Top-bar button uses the same color so the user can associate them
+        confirmBtn.setSuccessStyle();
+
+        confirmBtn.setOnAction(e -> showConfirmPopup(action, color, description));
+
+        confirmContainer.getChildren().addAll(confirmBtn);
+    }
+
+    private void showConfirmPopup(Action action, Color color, String description) {
+        Stage popupStage = new Stage();
+        popupStage.initModality(Modality.APPLICATION_MODAL);
+        popupStage.setTitle("Confirm Action");
+        popupStage.initStyle(StageStyle.TRANSPARENT);
+
+        // Root container with the colored border
+        VBox content = new VBox(15);
+        content.setPadding(new Insets(20));
+        content.setAlignment(Pos.CENTER);
+        content.setStyle(
+                "-fx-background-color: white;" +
+                        "-fx-border-color: " + toHex(color) + ";" +
+                        "-fx-border-width: 4;" +
+                        "-fx-border-radius: 8;" +
+                        "-fx-background-radius: 8;" +
+                        "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.4), 12, 0, 0, 4);"
+        );
+
+        // Scene with transparent fill so the rounded corners show properly
+        Scene scene = new Scene(content, 460, 220);
+        scene.setFill(Color.TRANSPARENT);
+
+        Label titleLabel = new Label("Confirm Action");
+        titleLabel.setStyle("-fx-font-size: 15px; -fx-font-weight: bold;");
+
+        Label descLabel = new Label(description);
+        descLabel.setWrapText(true);
+        descLabel.setMaxWidth(420);
+        descLabel.setAlignment(Pos.CENTER);
+
+        BetterButton proceedBtn = new BetterButton("Proceed");
+        proceedBtn.setSuccessStyle();
+        proceedBtn.setOnAction(e -> {
             SendAction(action);
             pendingAction = null;
             confirmContainer.getChildren().clear();
+            popupStage.close();
         });
-        confirmContainer.getChildren().addAll(confirmBtn);
+
+        BetterButton cancelBtn = new BetterButton("Cancel");
+        cancelBtn.setDangerStyle();
+        cancelBtn.setOnAction(e -> popupStage.close());
+
+        HBox btnBox = new HBox(10, cancelBtn, proceedBtn);
+        btnBox.setAlignment(Pos.CENTER);
+
+        content.getChildren().addAll(titleLabel, descLabel, btnBox);
+
+        popupStage.setScene(scene);
+
+        // Allow dragging the borderless window by holding anywhere on it
+        final double[] dragOffset = new double[2];
+        content.setOnMousePressed(e -> {
+            dragOffset[0] = e.getSceneX();
+            dragOffset[1] = e.getSceneY();
+        });
+        content.setOnMouseDragged(e -> {
+            popupStage.setX(e.getScreenX() - dragOffset[0]);
+            popupStage.setY(e.getScreenY() - dragOffset[1]);
+        });
+
+        popupStage.show();
+    }
+
+    private void showTurnEndPopup() {
+        FieldUnit unit = getUnitFromName(currentPlayer);
+        if (unit == null || !unit.isExists()) {
+            LogMessage("TurnEndAction failed: unit '" + currentPlayer + "' not found.");
+            return;
+        }
+
+        // ----- Collect what the unit still has available -----
+        List<String> leftovers = new ArrayList<>();
+
+        if (unit.hasTactical()) {
+            leftovers.add("Tactical action left");
+        }
+        if (unit.getATP() > 0) {
+            leftovers.add("ATP left: " + unit.getATP() + " / " + unit.getMaxATP());
+        }
+        if (unit.getStamina() > 0) {
+            leftovers.add("Stamina left: " + unit.getStamina() + " / " + unit.getMaxStamina());
+        }
+
+        String description;
+        if (leftovers.isEmpty()) {
+            description = "Are you sure you want to end turn?";
+        } else {
+            StringBuilder sb = new StringBuilder();
+            sb.append("Are you sure you want to end turn, you still have:\n");
+            for (String s : leftovers) {
+                sb.append("  • ").append(s).append("\n");
+            }
+            description = sb.toString();
+        }
+
+        // ----- Build and confirm the action -----
+        TurnEndAction action = new TurnEndAction(currentActionNumber, currentPlayer);
+        showConfirmPopup(action, Color.GRAY, description);
+    }
+
+
+    /** Converts a JavaFX Color to a CSS hex string (#RRGGBB). */
+    private String toHex(Color c) {
+        return String.format("#%02X%02X%02X",
+                (int) Math.round(c.getRed()   * 255),
+                (int) Math.round(c.getGreen() * 255),
+                (int) Math.round(c.getBlue()  * 255));
     }
 
     // ============================================================
     //   CONSOLE COMMANDS (DM / Debug)
     // ============================================================
 
-    private void processConsoleCommand(String command, TextArea output) {
+    private void processDMCommand(String command, TextArea output) {
         if (command == null || command.trim().isEmpty()) return;
         String[] parts = command.trim().split(" ");
         String action = parts[0].toLowerCase();
@@ -1079,9 +1226,6 @@ public class Game {
         }
     }
 
-    private void processDMCommand(String command, TextArea output) {
-        processConsoleCommand(command, output);
-    }
 
     // ---- Setters for player fields ----
     private void setActivePlayer(String player) {
@@ -1359,7 +1503,7 @@ public class Game {
             // Or use a factory; adjust as needed.
             PLAYERCreateEvangelionAction action = new PLAYERCreateEvangelionAction(
                     currentActionNumber+1, playerName, playerName, x, y, unit
-            );
+            , 0); //TODO TEAMS
             SendAction(action);
             popupStage.close();
         });
@@ -1412,21 +1556,60 @@ public class Game {
         currentPlayerLabel = new Label();
         currentPlayerLabel.setStyle("-fx-text-fill: lightgray;");
 
+        // --- Right-aligned area that contains both the Turn End and Confirm buttons ---
+        HBox rightBox = new HBox(10);
+        rightBox.setAlignment(Pos.CENTER_RIGHT);
+        HBox.setHgrow(rightBox, Priority.ALWAYS);
+
+        turnEndContainer = new HBox(10);
+        turnEndContainer.setAlignment(Pos.CENTER_RIGHT);
+
         confirmContainer = new HBox(10);
         confirmContainer.setAlignment(Pos.CENTER_RIGHT);
-        HBox.setHgrow(confirmContainer, Priority.ALWAYS);
 
-        topBar.getChildren().addAll(activeLabel, activePlayerLabel, currentPlayerLabel, confirmContainer);
+        rightBox.getChildren().addAll(turnEndContainer, confirmContainer);
+
+        topBar.getChildren().addAll(activeLabel, activePlayerLabel, currentPlayerLabel, rightBox);
     }
 
     private void updateTopBarColor() {
         if (topBar == null) return;
-        if (activePlayer != null && activePlayer.equals(currentPlayer)) {
+
+        boolean isMyTurn = activePlayer != null && activePlayer.equals(currentPlayer);
+
+        if (isMyTurn) {
             topBar.setStyle("-fx-background-color: #2e7d32;");
         } else {
             topBar.setStyle("-fx-background-color: #444444;");
         }
+
+        updateTurnEndButton(isMyTurn);
     }
+
+    /** Adds or removes the grey "Turn End" button depending on whose turn it is. */
+    private void updateTurnEndButton(boolean isMyTurn) {
+        if (turnEndContainer == null) return;
+        turnEndContainer.getChildren().clear();
+
+        if (!isMyTurn) return;
+        if (currentPlayer == null || currentPlayer.isEmpty()) return;
+        if (currentPlayer.equalsIgnoreCase("DM")) return; // DM has its own tools
+
+        BetterButton turnEndBtn = new BetterButton("Turn End");
+        turnEndBtn.setPrefHeight(10);
+        // Grey look
+        turnEndBtn.setStyle(
+                "-fx-background-color: #888888;" +
+                        "-fx-text-fill: white;" +
+                        "-fx-background-radius: 4;" +
+                        "-fx-padding: 4 14 4 14;"
+        );
+        turnEndBtn.setOnAction(e -> showTurnEndPopup());
+
+        turnEndContainer.getChildren().add(turnEndBtn);
+    }
+
+
 
     private void updateActivePlayerDisplay() {
         if (activePlayerLabel == null) return;
@@ -1456,6 +1639,11 @@ public class Game {
     private TextArea msgLogOutput;   // right panel
 
     // ---- Modified buildDmTab() ----
+
+    // ---- DM command history ----
+    private final List<String> dmCommandHistory = new ArrayList<>();
+    private int dmHistoryIndex = 0;
+
     private VBox buildDmTab() {
         VBox wrapper = new VBox(10);
         wrapper.setPadding(new Insets(10));
@@ -1514,11 +1702,41 @@ public class Game {
         TextField commandInput = new TextField();
         commandInput.setPromptText("Enter DM command...");
 
+// ---- Arrow-Up / Arrow-Down navigate the command history ----
+        commandInput.addEventFilter(KeyEvent.KEY_PRESSED, event -> {
+            if (event.getCode() == KeyCode.UP) {
+                if (!dmCommandHistory.isEmpty() && dmHistoryIndex > 0) {
+                    dmHistoryIndex--;
+                    commandInput.setText(dmCommandHistory.get(dmHistoryIndex));
+                    commandInput.positionCaret(commandInput.getText().length());
+                }
+                event.consume();
+            } else if (event.getCode() == KeyCode.DOWN) {
+                if (dmHistoryIndex < dmCommandHistory.size() - 1) {
+                    dmHistoryIndex++;
+                    commandInput.setText(dmCommandHistory.get(dmHistoryIndex));
+                    commandInput.positionCaret(commandInput.getText().length());
+                } else if (dmHistoryIndex == dmCommandHistory.size() - 1) {
+                    // Stepped past the newest entry -> back to an empty prompt
+                    dmHistoryIndex = dmCommandHistory.size();
+                    commandInput.clear();
+                }
+                event.consume();
+            }
+        });
+
         BetterButton sendCmdBtn = new BetterButton("Send");
         sendCmdBtn.setPrimaryStyle();
         sendCmdBtn.setOnAction(e -> {
             String cmd = commandInput.getText().trim();
             if (!cmd.isEmpty()) {
+                // Record in history (skip exact duplicates of the last command)
+                if (dmCommandHistory.isEmpty()
+                        || !dmCommandHistory.get(dmCommandHistory.size() - 1).equals(cmd)) {
+                    dmCommandHistory.add(cmd);
+                }
+                dmHistoryIndex = dmCommandHistory.size();
+
                 dmConsoleOutput.appendText("> " + cmd + "\n");
                 processDMCommand(cmd, dmConsoleOutput);  // output goes to command console
                 commandInput.clear();
@@ -1800,6 +2018,7 @@ public class Game {
                 " to " + toSlot.name + (targetHadItem ? " (replacing existing item)" : " (empty)"));
 
         clearPreviewArrows();
+        String s = "";
         drawUIArrowBetween(fromNode, toNode, Color.ORANGE);
         FieldUnit evaUnit = getUnitFromName(currentPlayer);
         if (draggedFromField != null) {
@@ -1813,13 +2032,16 @@ public class Game {
                         Arrow.ArrowType.PREVIEW);
                 arrows.add(arrow);
             }
-            createConfirmButton(InventoryItemTransferAction.pickUpAction(currentActionNumber, currentPlayer,
-            ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(toSlot), draggedFromField.getX()- evaUnit.getX(),
-            draggedFromField.getY() - evaUnit.getY()));
-        } else
-            createConfirmButton(InventoryItemTransferAction.InventorySwitch(currentActionNumber, currentPlayer,
-            ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(fromSlot), ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(toSlot)));
-
+            pendingAction = InventoryItemTransferAction.pickUpAction(currentActionNumber, currentPlayer,
+                    ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(toSlot), draggedFromField.getX()- evaUnit.getX(),
+                    draggedFromField.getY() - evaUnit.getY());
+            s = "Picking up "+item.getName()+" from ("+draggedFromField.getX()+","+draggedFromField.getY()+") with "+toSlot.getName();
+        } else {
+            pendingAction = InventoryItemTransferAction.InventorySwitch(currentActionNumber, currentPlayer,
+                    ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(fromSlot), ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(toSlot));
+            s = "Putting "+item.getName()+" from "+fromSlot.getName()+" to "+toSlot.getName();
+        }
+        createConfirmButton(pendingAction, Color.BLACK, s);
     }
 
     private void onDraggingItemToBattlefield(Item item, Slot fromSlot, int x, int y, Node targetCell) {
@@ -1838,14 +2060,15 @@ public class Game {
                     Arrow.ArrowType.PREVIEW);
             arrows.add(arrow);
         }
+        pendingAction = InventoryItemTransferAction.dropAction(currentActionNumber, currentPlayer,
+                ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(fromSlot), x- evaUnit.getX(), y- evaUnit.getY());
 
-        createConfirmButton(InventoryItemTransferAction.dropAction(currentActionNumber, currentPlayer,
-                ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(fromSlot), x- evaUnit.getX(), y- evaUnit.getY()));
-
-
+        createConfirmButton(pendingAction, Color.BLACK, "Dropping "+item.getName()+" from "+fromSlot.getName()+" to "+CordsToText(x, y));
     }
 
-
+    public String CordsToText(int x, int y) {
+        return "("+x+","+y+")";
+    }
     public void createFieldItemAt(Item item, int x, int y){
         FieldItem newitem = new FieldItem(item, x, y);
         FieldItemList.add(newitem);

@@ -14,6 +14,21 @@ public class GameState implements Serializable {
 
     private InitialState initialState;
     private List<Action> ActionList = new ArrayList<>();
+    public enum GAME_MODE {
+        CLASSIC,
+        CUSTOM,
+        FFA,
+        TEAM
+    }
+    private GAME_MODE GameMode;
+
+    public void setGameMode(GAME_MODE gameMode) {
+        GameMode = gameMode;
+    }
+
+    public GAME_MODE getGameMode() {
+        return GameMode;
+    }
 
     public GameState() {
     }
