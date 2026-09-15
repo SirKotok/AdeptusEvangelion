@@ -1,6 +1,7 @@
 package eva.evangelion.view;
 
 import eva.evangelion.gameboard.Battlefield;
+import eva.evangelion.state.GameState;
 import eva.evangelion.units.type.EvangelionIO;
 import eva.evangelion.view.UIElements.ToggleUIButton;
 import eva.evangelion.view.UIElements.ScrollableContainer;
@@ -434,34 +435,43 @@ public class MainMenu {
         modeBox.setAlignment(Pos.CENTER_LEFT);
 
         // ---- Mode-specific input area ----
+        // ---- Mode-specific input area ----
         VBox modeSpecificBox = new VBox(10);
         modeSpecificBox.setAlignment(Pos.CENTER_LEFT);
 
-        // Create mode inputs
+// Create mode inputs
         HBox playerCountBox = new HBox(10);
         playerCountBox.setAlignment(Pos.CENTER_LEFT);
         Label playerCountLabel = new Label("Number of Players:");
         Spinner<Integer> playerSpinner = new Spinner<>(1, 13, 1);
         playerCountBox.getChildren().addAll(playerCountLabel, playerSpinner);
 
-        // Connect mode inputs
+// ---- Game Mode Selection (Create only) ----
+        ComboBox<GameState.GAME_MODE> gameModeCombo = new ComboBox<>();
+        gameModeCombo.getItems().addAll(GameState.GAME_MODE.values());
+        gameModeCombo.setValue(GameState.GAME_MODE.CLASSIC);
+        HBox gameModeBox = new HBox(10,
+                new Label("Game Mode:"), gameModeCombo);
+        gameModeBox.setAlignment(Pos.CENTER_LEFT);
+
+// Connect mode inputs
         HBox nameBox = new HBox(10);
         nameBox.setAlignment(Pos.CENTER_LEFT);
         Label nameLabel = new Label("Player Name:");
         TextField nameField = new TextField("Player1");
         nameBox.getChildren().addAll(nameLabel, nameField);
 
-        // Show/hide based on radio selection
+// Show/hide based on radio selection
         modeGroup.selectedToggleProperty().addListener((obs, oldToggle, newToggle) -> {
             modeSpecificBox.getChildren().clear();
             if (newToggle == createRadio) {
-                modeSpecificBox.getChildren().add(playerCountBox);
+                modeSpecificBox.getChildren().addAll(playerCountBox, gameModeBox);
             } else {
                 modeSpecificBox.getChildren().add(nameBox);
             }
         });
-        // Initial content
-        modeSpecificBox.getChildren().add(playerCountBox);
+// Initial content
+        modeSpecificBox.getChildren().addAll(playerCountBox, gameModeBox);
 
         // ---- Speed controls (same as before) ----
         Label speedLabel = new Label("Speed: 1.0x");
@@ -490,12 +500,16 @@ public class MainMenu {
         confirmBtn.setOnAction(e -> {
             double speed = speedSlider.getValue();
             boolean fast = fastCheck.isSelected();
-            Battlefield dummyBattlefield = new Battlefield(50, 50);  // will be ignored in connect mode
+            GameState.GAME_MODE selectedMode =
+                    gameModeCombo.getValue() == null ? GameState.GAME_MODE.CLASSIC
+                            : gameModeCombo.getValue();
+            Battlefield dummyBattlefield = new Battlefield(50, 50);
 
             if (createRadio.isSelected()) {
                 int playerCount = playerSpinner.getValue();
-                Game.startGame(dummyBattlefield, speed, fast, playerCount, "DM", true);
-            } else { // Connect mode
+                Game.startGame(dummyBattlefield, speed, fast, playerCount,
+                        "DM", true, selectedMode);
+            } else {
                 String playerName = nameField.getText().trim();
                 if (playerName.isEmpty()) {
                     Alert alert = new Alert(Alert.AlertType.WARNING);
@@ -503,7 +517,6 @@ public class MainMenu {
                     alert.showAndWait();
                     return;
                 }
-                // Check if game file exists
                 File gameFile = new File("Active/gamestate.ser");
                 if (!gameFile.exists()) {
                     Alert alert = new Alert(Alert.AlertType.ERROR);
@@ -511,7 +524,10 @@ public class MainMenu {
                     alert.showAndWait();
                     return;
                 }
-                Game.startGame(dummyBattlefield, speed, fast, 1, playerName, false);
+                // gamemode is loaded from the file in reloadGameState, the
+                // argument here is only a fallback.
+                Game.startGame(dummyBattlefield, speed, fast, 1, playerName,
+                        false, GameState.GAME_MODE.CLASSIC);
             }
         });
 

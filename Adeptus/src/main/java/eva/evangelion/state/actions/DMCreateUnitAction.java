@@ -10,12 +10,7 @@ public class DMCreateUnitAction extends Action {
     private final int y;
 
     public DMCreateUnitAction(int actionNumber, String actor, String unitName, int x, int y) {
-        super(actionNumber, actor);
-        this.unitName = unitName;
-        this.x = x;
-        this.y = y;
-        setTime(0.01);
-        team = 0;
+        this(actionNumber, actor, unitName, x, y, 0);
     }
 
     public DMCreateUnitAction(int actionNumber, String actor, String unitName, int x, int y, int team) {
@@ -23,15 +18,13 @@ public class DMCreateUnitAction extends Action {
         this.unitName = unitName;
         this.x = x;
         this.y = y;
-        setTime(0.01);
         this.team = team;
+        setTime(0.01);
     }
 
-    public Unit getUnit() {
-        return unit;
-    }
-
-    public String getUnitName() { return unitName; }
-    public int getX() { return x; }
-    public int getY() { return y; }
+    public Unit   getUnit()      { return unit; }
+    public String getUnitName()  { return unitName; }
+    public int    getX()         { return x; }
+    public int    getY()         { return y; }
+    public int    getTeam()      { return team; }
 }

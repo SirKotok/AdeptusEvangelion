@@ -72,6 +72,9 @@ public class Game {
     //   FIELDS
     // ============================================================
 
+    private GameState.GAME_MODE gameMode = GameState.GAME_MODE.CLASSIC;
+    private boolean showAllUnits = false;
+
     private final Stage stage;
     private GameBoard gameBoard;          // reference to the main board
     private Item draggedItem;            // item being dragged
@@ -145,7 +148,10 @@ public class Game {
     // ============================================================
     private int startingplayernumber;
 
-    public Game(Battlefield battlefield, String playerName, double speed, boolean fast, int playernumber, boolean startnew) {
+    public Game(Battlefield battlefield, String playerName, double speed, boolean fast,
+                int playernumber, boolean startnew, GameState.GAME_MODE gameMode) {
+        this.gameMode = (gameMode != null) ? gameMode : GameState.GAME_MODE.CLASSIC;
+
         System.out.println("STARTING GAME WITH "+playernumber+" PLAYERNUMBER AND STARTNEW = "+startnew);
         this.battlefield = battlefield;
         this.actionSpeed = speed;
@@ -255,6 +261,9 @@ public class Game {
                }
             }
             if (newState != null) {
+                if (newState.getGameMode() != null) {
+                    gameMode = newState.getGameMode();
+                }
                 processNewState(newState);
             }
         } catch (IOException | ClassNotFoundException e) {
@@ -369,6 +378,8 @@ public class Game {
             processPLAYERCreateEvangelion((PLAYERCreateEvangelionAction) action);
         } else if (action instanceof InventoryItemTransferAction) {
             processInventoryItemTransferAction((InventoryItemTransferAction) action);
+        } else if (action instanceof SwitchTeamAction) {
+            processSwitchTeamAction((SwitchTeamAction) action);
         } else if (action instanceof TurnEndAction) {
             processTurnEndAction((TurnEndAction) action);
         } else
@@ -440,6 +451,19 @@ public class Game {
 
 
     }
+    private void processSwitchTeamAction(SwitchTeamAction action) {
+        DMQueueInsertion(action, "SWITCH_TEAM");
+
+        FieldUnit unit = getUnitFromName(action.getTargetName());
+        if (unit == null || !unit.isExists()) {
+            LogMessage("SwitchTeamAction failed: unit not found: " + action.getTargetName());
+            return;
+        }
+        int oldTeam = unit.getTeam();
+        unit.setTeam(action.getNewTeam());
+        LogMessage("Switched team of " + unit.getName() + " from " + oldTeam + " to " + action.getNewTeam());
+
+    }
 
     private void processTurnEndAction(TurnEndAction action) {
         FieldUnit actor = getUnitFromName(action.getActor());
@@ -448,6 +472,7 @@ public class Game {
             return;
         }
         actor.ClearEffects(Effect.EffectEnd.TURN_END);
+        actor.setTurnDone(true);                              // NEW
         if (actor.getUnit() instanceof Evangelion) {
             processEndPlayerTurn(action);
         }
@@ -618,8 +643,10 @@ public class Game {
         }
 
         FieldUnit unit = createFieldUnit(name, action.getUnit(), x, y);
+        unit.setTeam(action.getTeam());
         double visualDuration = fastActions ? 0.1 : action.getTime() / actionSpeed;
         animateCreateUnit(unit, visualDuration);
+
         LogMessage("DMCreateUnitAction: Created unit '" + name + "' at (" + x + "," + y + ").");
     }
 
@@ -651,6 +678,11 @@ public class Game {
             current.setUnitID("DM_Choose");
             LogMessage("Renamed ID to "+current.getUnitID());
             String chosen = action.getChosenPlayer();
+            FieldUnit chosenUnit = getUnitFromName(chosen);
+            if (chosenUnit != null && chosenUnit.isTurnDone()) {
+                LogMessage("Changed turn done to false for "+chosen);
+                chosenUnit.setTurnDone(false);   // NEW
+            }
             QueuePosition nextPos = new QueuePosition(chosen, false);
             nextPos.setActionNumber(-1);
             LogMessage("Adding queue position for " + nextPos.getUnitID() + " at DMPlayerAction");
@@ -783,6 +815,8 @@ public class Game {
     }
 
     private void addUnitToTeam(FieldUnit newUnit, int team) {
+        newUnit.setTeam(team);
+        LogMessage("Assigned team " + team + " to unit " + newUnit.getName());
     }
 
 
@@ -852,6 +886,7 @@ public class Game {
         if (sn) {
             LogMessage("Creating new gamestate at creation");
             gamestate = new GameState();
+            gamestate.setGameMode(gameMode);
             saveGameState();
         }
         else {
@@ -1073,46 +1108,83 @@ public class Game {
         if (command == null || command.trim().isEmpty()) return;
         String[] parts = command.trim().split(" ");
         String action = parts[0].toLowerCase();
-
+        if (action.startsWith("/")) action = action.substring(1);   // NEW: tolerate "/showAllUnits"
         switch (action) {
             case "create":
                 if (parts.length < 4) {
-                    output.appendText("Error: Usage: create <name> <x> <y>\n");
+                    output.appendText("Error: Usage: create <name> <x> <y> [team]\n");
                     return;
                 }
                 StringBuilder nameBuilder = new StringBuilder();
-                int x = -1, y = -1;
+                int x = -1, y = -1, team = 0;
                 try {
-                    y = Integer.parseInt(parts[parts.length - 1]);
-                    x = Integer.parseInt(parts[parts.length - 2]);
-                    for (int j = 1; j < parts.length - 2; j++) {
+                    int end = parts.length;
+                    boolean teamPresent = parts.length >= 5
+                            && isValidInt(parts[end - 1])
+                            && isValidInt(parts[end - 2])
+                            && isValidInt(parts[end - 3]);
+                    if (teamPresent) {
+                        team = Integer.parseInt(parts[end - 1]);
+                        end--;
+                    }
+                    y = Integer.parseInt(parts[end - 1]);
+                    x = Integer.parseInt(parts[end - 2]);
+                    for (int j = 1; j < end - 2; j++) {
                         if (j > 1) nameBuilder.append(" ");
                         nameBuilder.append(parts[j]);
                     }
                 } catch (NumberFormatException ex) {
-                    output.appendText("Error: x and y must be integers.\n");
+                    output.appendText("Error: x, y (and team) must be integers.\n");
                     return;
                 }
                 String name = nameBuilder.toString();
-                if (name.isEmpty()) {
-                    output.appendText("Error: Name cannot be empty.\n");
-                    return;
-                }
+                if (name.isEmpty()) { output.appendText("Error: Name cannot be empty.\n"); return; }
                 if (x < 0 || x >= battlefield.sizeX || y < 0 || y >= battlefield.sizeY) {
-                    output.appendText("Error: Coordinates out of bounds (0.." + (battlefield.sizeX-1) + ", 0.." + (battlefield.sizeY-1) + ").\n");
-                    return;
+                    output.appendText("Error: Coordinates out of bounds.\n"); return;
                 }
                 for (FieldUnit u : UnitList) {
                     if (u.isExists() && u.getName().equals(name)) {
-                        output.appendText("Error: Unit with name '" + name + "' already exists.\n");
-                        return;
+                        output.appendText("Error: Unit '" + name + "' already exists.\n"); return;
                     }
                 }
                 DMCreateUnitAction createAction = new DMCreateUnitAction(
-                        currentActionNumber, "DM", name, x, y
-                );
+                        currentActionNumber, "DM", name, x, y, team);
                 SendAction(createAction);
-                output.appendText("Sent DMCreateUnitAction for '" + name + "' at (" + x + ", " + y + ").\n");
+                output.appendText("Sent DMCreateUnitAction for '" + name + "' at ("
+                        + x + ", " + y + ") team=" + team + ".\n");
+                break;
+            case "team":
+                // team <name> <teamNumber>
+                if (parts.length < 3) {
+                    output.appendText("Error: Usage: team <unitName> <newTeamNumber>\n");
+                    return;
+                }
+                StringBuilder targetNameBuilder = new StringBuilder();
+                int newTeam;
+                try {
+                    newTeam = Integer.parseInt(parts[parts.length - 1]);
+                    for (int j = 1; j < parts.length - 1; j++) {
+                        if (j > 1) targetNameBuilder.append(" ");
+                        targetNameBuilder.append(parts[j]);
+                    }
+                } catch (NumberFormatException ex) {
+                    output.appendText("Error: team number must be an integer.\n");
+                    return;
+                }
+                String targetName = targetNameBuilder.toString().trim();
+                if (targetName.isEmpty()) {
+                    output.appendText("Error: unit name cannot be empty.\n");
+                    return;
+                }
+                SwitchTeamAction switchAction = new SwitchTeamAction(
+                        currentActionNumber, "DM", targetName, newTeam);
+                SendAction(switchAction);
+                output.appendText("Sent SwitchTeamAction: " + targetName + " -> team " + newTeam + "\n");
+                break;
+            case "showallunits":
+                showAllUnits = !showAllUnits;
+                output.appendText("showAllUnits = " + showAllUnits + "\n");
+                updateNamePanels();
                 break;
             case "actions":
                     output.appendText(outputActions());
@@ -1210,7 +1282,7 @@ public class Game {
 
             case "help":
                 output.appendText("Available commands:\n");
-                output.appendText("  create <name> <x> <y>  – creates a new unit\n");
+                output.appendText("  create <name> <x> <y> [team]  – creates a new unit (optional team)\n");
                 output.appendText("  delete <name>          – deletes a unit (and any items on their slot) by name\n");
                 output.appendText("  delete <x> <y>         – deletes unit + items at a sector\n");
                 output.appendText("  active <playerName>    – DM chooses next player\n");
@@ -1218,6 +1290,8 @@ public class Game {
                 output.appendText("  queue                  – shows current queue positions\n");
                 output.appendText("  actions                – shows all actions and their numbers in gamestate\n");
                 output.appendText("  help                   – shows this help\n");
+                output.appendText("  team <name> <teamNumber> – switches a unit to another team\n");
+                output.appendText("  /showAllUnits          – toggle showing finished units in the next-turn list\n");
                 break;
 
             default:
@@ -1375,6 +1449,11 @@ public class Game {
         TextField yField = new TextField();
         yField.setPromptText("Y (0-" + (battlefield.sizeY-1) + ")");
 
+        // ---- Team input only shown in TEAM / CUSTOM ----
+        TextField teamField = new TextField();
+        teamField.setPromptText("Team #");
+        boolean manualTeam = (gameMode == GameState.GAME_MODE.TEAM
+                || gameMode == GameState.GAME_MODE.CUSTOM);
 
         Runnable validate = () -> {
             boolean valid = false;
@@ -1384,27 +1463,40 @@ public class Game {
                     int x = Integer.parseInt(xField.getText().trim());
                     int y = Integer.parseInt(yField.getText().trim());
                     if (x >= 0 && x < battlefield.sizeX && y >= 0 && y < battlefield.sizeY) {
+                        if (manualTeam) {
+                            Integer.parseInt(teamField.getText().trim()); // must parse
+                        }
                         valid = true;
                     }
-                } catch (NumberFormatException e) {
-                }
+                } catch (NumberFormatException ignored) { }
             }
             confirmBtn.setDisable(!valid);
         };
 
-        nameField.textProperty().addListener((obs, old, neu) -> validate.run());
-        xField.textProperty().addListener((obs, old, neu) -> validate.run());
-        yField.textProperty().addListener((obs, old, neu) -> validate.run());
+        nameField.textProperty().addListener((o, a, b) -> validate.run());
+        xField.textProperty().addListener((o, a, b) -> validate.run());
+        yField.textProperty().addListener((o, a, b) -> validate.run());
+        teamField.textProperty().addListener((o, a, b) -> validate.run());
 
         confirmBtn.setOnAction(e -> {
             String name = nameField.getText().trim();
             int x = Integer.parseInt(xField.getText().trim());
             int y = Integer.parseInt(yField.getText().trim());
 
-            int location = currentActionNumber+1;
-            LogMessage("Creating INITIAL REQUEST action with AN "+location+ " current queue size "+queue.getQueue().size());
-            AddPlayerAction action = new AddPlayerAction(location, "DM", name, x, y
-            );
+            int team;
+            switch (gameMode) {
+                case CLASSIC -> team = 0;
+                case FFA -> {
+                    long existing = gamestate.getActions().stream()
+                            .filter(a -> a instanceof AddPlayerAction).count();
+                    team = (int) existing + 1;   // first FFA player -> team 1
+                }
+                default -> team = Integer.parseInt(teamField.getText().trim());
+            }
+
+            int location = currentActionNumber + 1;
+            LogMessage("Creating AddPlayerAction AN=" + location + " team=" + team);
+            AddPlayerAction action = new AddPlayerAction(location, "DM", name, x, y, team);
             SendAction(action);
             popupStage.close();
         });
@@ -1415,6 +1507,9 @@ public class Game {
                 new HBox(10, new Label("X:"), xField),
                 new HBox(10, new Label("Y:"), yField)
         );
+        if (manualTeam) {
+            vbox.getChildren().add(new HBox(10, new Label("Team:"), teamField));
+        }
         return vbox;
     }
 
@@ -1431,10 +1526,15 @@ public class Game {
         VBox vbox = new VBox(10);
         vbox.setPadding(new Insets(5));
 
+
         if (!(cause instanceof AddPlayerAction))  {
             LogMessage("ERROR - POP UP FOR PLAYERSETUP NOT FROM ADD PLAYER BUTTON");
             return null;
         }
+
+        int assignedTeam = ((AddPlayerAction) cause).getTeam();
+        Label teamLabel = new Label("Team: " + assignedTeam);
+
         int spawnX = ((AddPlayerAction) cause).getX();
         int spawnY = ((AddPlayerAction) cause).getY();
 
@@ -1498,18 +1598,17 @@ public class Game {
             EvangelionType type = typeCombo.getValue();
             int x = Integer.parseInt(xField.getText().trim());
             int y = Integer.parseInt(yField.getText().trim());
-            // Create a new Evangelion unit
-            Unit unit = new Evangelion(type); // assuming Evangelion constructor takes type
-            // Or use a factory; adjust as needed.
+            Unit unit = new Evangelion(type);
             PLAYERCreateEvangelionAction action = new PLAYERCreateEvangelionAction(
-                    currentActionNumber+1, playerName, playerName, x, y, unit
-            , 0); //TODO TEAMS
+                    currentActionNumber + 1, playerName, playerName, x, y, unit,
+                    assignedTeam);          // <-- use the team from AddPlayerAction
             SendAction(action);
             popupStage.close();
         });
 
         vbox.getChildren().addAll(
                 playerLabel,
+                teamLabel,
                 new HBox(10, new Label("Evangelion Type:"), typeCombo),
                 new HBox(10, new Label("X:"), xField),
                 new HBox(10, new Label("Y:"), yField)
@@ -1855,7 +1954,7 @@ public class Game {
         panel.getChildren().addAll(nameRow, buttonList);
     }
 
-    // ---- New: Update turn choice UI ----
+
     private void updateTurnChoiceUI(VBox panel) {
         panel.getChildren().clear();
 
@@ -1863,25 +1962,44 @@ public class Game {
         info.setStyle("-fx-font-size: 12px;");
         panel.getChildren().add(info);
 
-        VBox buttonList = new VBox(5);
-        buttonList.setAlignment(Pos.CENTER_LEFT);
-
+        // Group live units by team
+        Map<Integer, List<FieldUnit>> byTeam = new TreeMap<>();
         for (FieldUnit unit : UnitList) {
-            if (unit.isExists()) {
-                BetterButton btn = new BetterButton(unit.getName());
+            if (!unit.isExists()) continue;
+            if (unit.isTurnDone() && !showAllUnits) continue;
+            byTeam.computeIfAbsent(unit.getTeam(), k -> new ArrayList<>()).add(unit);
+        }
+
+        for (Map.Entry<Integer, List<FieldUnit>> e : byTeam.entrySet()) {
+            Label teamHeader = new Label("Team " + e.getKey());
+            teamHeader.setStyle("-fx-font-weight: bold; -fx-underline: true; -fx-padding: 4 0 0 0;");
+            panel.getChildren().add(teamHeader);
+
+            VBox buttonList = new VBox(5);
+            buttonList.setAlignment(Pos.CENTER_LEFT);
+            for (FieldUnit unit : e.getValue()) {
+                String label = unit.getName() + (unit.isTurnDone() ? "  (done)" : "");
+                BetterButton btn = new BetterButton(label);
                 btn.setPrimaryStyle();
                 btn.setMaxWidth(Double.MAX_VALUE);
-                btn.setOnAction(e -> {
-                    // Create a DMChoosePlayerAction for this unit
-                    DMChoosePlayerAction action = new DMChoosePlayerAction(currentActionNumber, "DM", unit.getName());
+                btn.setOnAction(ev -> {
+                    DMChoosePlayerAction action = new DMChoosePlayerAction(
+                            currentActionNumber, "DM", unit.getName());
                     SendAction(action);
-                    LogMessage("DM chose " + unit.getName() + " as the next player. AN = "+currentActionNumber);
+                    LogMessage("DM chose " + unit.getName() + " as the next player.");
                 });
                 buttonList.getChildren().add(btn);
             }
+            panel.getChildren().add(buttonList);
         }
 
-        panel.getChildren().add(buttonList);
+        if (byTeam.isEmpty()) {
+            Label empty = new Label(showAllUnits
+                    ? "No units on the field."
+                    : "All units have finished their turn. Type /showAllUnits to view them.");
+            empty.setStyle("-fx-text-fill: #666; -fx-font-style: italic;");
+            panel.getChildren().add(empty);
+        }
     }
 
     // ---- Other Tabs (unchanged) ----
@@ -3202,17 +3320,25 @@ public class Game {
 
 
     public static void startGame(Battlefield field, double speed, boolean fast, int playernumber) {
-        System.out.println("Starting game with speed "+speed+" fast "+fast+" playernumber "+playernumber);
-        new Game(field, "DM", speed, fast, playernumber, true);
+        startGame(field, speed, fast, playernumber, "DM", true, GameState.GAME_MODE.CLASSIC);
     }
+
     public static void startGame(Battlefield field, double speed, boolean fast,
                                  int playernumber, String playerName, boolean startNew) {
-        // Temporary implementation – user will replace with actual load/create logic
+        startGame(field, speed, fast, playernumber, playerName, startNew,
+                GameState.GAME_MODE.CLASSIC);
+    }
+
+    public static void startGame(Battlefield field, double speed, boolean fast,
+                                 int playernumber, String playerName, boolean startNew,
+                                 GameState.GAME_MODE gameMode) {
+        System.out.println("Starting game with speed " + speed + " fast " + fast
+                + " playernumber " + playernumber + " gamemode " + gameMode);
         if (startNew) {
-            startGame(field, speed, fast, playernumber);
+            new Game(field, "DM", speed, fast, playernumber, true, gameMode);
         } else {
             System.out.println("Connecting as " + playerName);
-            new Game(field, playerName, speed, fast, -1, startNew);
+            new Game(field, playerName, speed, fast, -1, false, gameMode);
         }
     }
 
