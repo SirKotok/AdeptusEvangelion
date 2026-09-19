@@ -213,7 +213,11 @@ Positron Weapons pierce all manner of protections with ease.  Positron Weapons h
         return hands;
     }
 
-    public Tech CurrentTech = Tech.NONE;
+
+    public Tech getCurrentTech() {
+        return Technology.get(0);
+    }
+
 
    public static Weapon createBasicMeleeWeapon(String name, String type, Tech t, List<Customisation> Customisation, Hand h) {
        Weapon w = new Weapon(name, type, h);
@@ -227,14 +231,15 @@ Positron Weapons pierce all manner of protections with ease.  Positron Weapons h
                                                  String type,
                                                  Tech t,
                                                  List<Customisation> Customisation,
-                                                 int ammo,
-                                                 Hand h) {
+                                                 Hand h, int ammo, int minrange, int maxrange) {
         Weapon w = new Weapon(name, type, h);
         w.Technology.add(t);
         w.Customisations = Customisation;
         w.Ranged = true;
         w.doesNormalProfiles = true;
         w.setAmmo(ammo);
+        w.setMinRange(minrange);
+        w.setMaxRange(maxrange);
         w.setMaxAmmo(ammo);
         return w;
     }
@@ -257,7 +262,7 @@ Positron Weapons pierce all manner of protections with ease.  Positron Weapons h
 
 
   public List<AttackProfile> getWeaponProfiles(Tech tech){
-      CurrentTech = tech;
+
       if (!doesNormalProfiles) return getSpecialProfiles();
       List<AttackProfile> profiles = new ArrayList<>();
       profiles.addAll(getNormalProfiles());
@@ -270,7 +275,7 @@ Positron Weapons pierce all manner of protections with ease.  Positron Weapons h
           if (getBaseArea() != -1 && profile.AreaType == -1) profile.AreaType = getBaseArea(); //set profile to correct area
           profile.Penetration+=getBasePenetration(); //Add basic penetration to profile;
 
-          switch (CurrentTech) { // TODO CHAIN, GAUSS
+          switch (tech) { // TODO CHAIN, GAUSS
               case POLYTHERMIC -> {
                   profile.Penetration++;
                  //TODO Polythermic handling {if (profile.Dice*profile.Dicepower < 7) {profile.Dice = 3;} else {profile.Dice = 4; profile.Power++;} profile.Dicepower = 3;}

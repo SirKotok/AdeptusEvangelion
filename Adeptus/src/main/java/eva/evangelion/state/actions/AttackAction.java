@@ -1,5 +1,7 @@
 package eva.evangelion.state.actions;
 
+import eva.evangelion.items.Weapon.AttackProfile;
+
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,12 +19,23 @@ public class AttackAction extends Action {
     /** Every sector hit by this attack. */
     public List<Hit> hitPositions = new ArrayList<>();
 
-    // ---- Attack metadata (consumed by confirm popup + future resolution) ----
-    public String weaponName;        // null = neutral / unarmed
-    public String weaponSlotName;    // null = neutral / unarmed
-    public String profileName;
-    public int    ammoCost;
-    public int    rolledValue;       // d100 result
+
+
+    public int slotNumber = -1;
+    public AttackProfile actionCombatProfile;
+
+    public AttackProfile getActionCombatProfile() {
+        return actionCombatProfile;
+    }
+
+    public void setActionCombatProfile(AttackProfile actionCombatProfile) {
+        this.actionCombatProfile = actionCombatProfile;
+    }
+
+    public int rolledValue;        // d100 attack roll        (existing)
+    public int rolledDamage;       // raw damage before area halving
+    public int finalDamage;        // damage after area halving (== rolledDamage if not area or hit)
+    public int techDamageBonus;    // flat bonus applied from tech (e.g. Gauss DoS)
 
     public AttackAction(int actionNumber, String actor) {
         super(actionNumber, actor);
@@ -34,7 +47,7 @@ public class AttackAction extends Action {
     @Override
     public String toString() {
         return "AttackAction{actor=" + getActor() +
-                ", profile=" + profileName +
+                ", profile=" + actionCombatProfile.toString() +
                 ", hits=" + hitPositions + "}";
     }
 }

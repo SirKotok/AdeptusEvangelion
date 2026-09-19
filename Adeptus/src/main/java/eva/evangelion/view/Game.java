@@ -8,6 +8,9 @@ import eva.evangelion.items.Weapon.Weapon;
 import eva.evangelion.units.battle.*;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.ObjectInputStream;
 import eva.evangelion.items.Weapon.FieldItem;
 import eva.evangelion.state.actions.*;
 import eva.evangelion.view.UIElements.ScrollableContainer;
@@ -375,11 +378,15 @@ public class Game {
         processActionCost(action);
         if (action instanceof MoveAction) {
             processMoveAction((MoveAction) action);
+        } else if (action instanceof AttackAction) {
+            processAttackAction((AttackAction) action);
         } else if (action instanceof DMChoosePlayerAction) {
             processDMChoosePlayerAction((DMChoosePlayerAction) action);
         } else if (action instanceof DMCreateUnitAction) {
             processDMCreateUnitAction((DMCreateUnitAction) action);
-        } else if (action instanceof EndRoundAction) {
+        } else if (action instanceof DMGiveWeaponAction) {
+            processDMGiveWeaponAction((DMGiveWeaponAction) action);
+        }  else if (action instanceof EndRoundAction) {
             processForcedRoundEnd((EndRoundAction) action);
         } else if (action instanceof DMDeleteUnitAction) {
             processDMDeleteUnitAction((DMDeleteUnitAction) action);
@@ -425,6 +432,158 @@ public class Game {
         );
 
         mainContainer.getContentBox().setBackground(new Background(background));
+    }
+
+    /**
+     * Resolves a single AttackAction:
+     *   1. Pulls the attacker, profile, and weapon off the action.
+     *   2. Consumes Ammo for the profile (if any).
+     *   3. Decides hit / miss by comparing {@code rolledValue} to Accuracy.
+     *   4. Applies damage to every hit sector, honouring Armor / Penetration.
+     *   5. Fires tech on-hit riders (Chain bleed, Superconductive penalty…).
+     *   6. Advances the queue.
+     *
+     * The numbers shown in the confirmation popup are the numbers used here:
+     * {@code rolledValue} is the d100, {@code rolledDamage} is the raw roll,
+     * and {@code finalDamage} is the raw roll after any Area/Line halving.
+     * If either damage field arrives as 0 (e.g. an action created outside the
+     * popup), we roll fresh so the pipeline never silently deals zero.
+     */
+    private void processAttackAction(AttackAction attack) {
+    //TODO REMAKE THIS SO IT WORKS IDK
+        // ----- 1. Actor -----
+        FieldUnit actor = getUnitFromName(attack.getActor());
+        if (actor == null || !actor.isExists()) {
+            LogMessage("AttackAction failed: actor '" + attack.getActor() + "' not found.");
+            return;
+        }
+
+        AttackProfile profile = attack.getActionCombatProfile();
+        if (profile == null) {
+            LogMessage("AttackAction failed: no combat profile attached.");
+            return;
+        }
+
+        // ----- 2. Weapon (null for neutral / unarmed) -----
+        Weapon weapon = null;
+        if (attack.slotNumber >= 0 && actor.getSlots() != null
+                && attack.slotNumber < actor.getSlots().size()) {
+            Slot weaponSlot = actor.getSlots().get(attack.slotNumber);
+            if (weaponSlot.getItem() instanceof Weapon w) weapon = w;
+        }
+
+        // ----- 3. Consume Ammo -----
+        if (weapon != null && profile.AmmoCost > 0) {
+            int before = weapon.getAmmo();
+            weapon.setAmmo(Math.max(0, before - profile.AmmoCost));
+            LogMessage("Ammo consumed: " + profile.AmmoCost
+                    + " on " + weapon.getName()
+                    + " (" + before + " -> " + weapon.getAmmo() + ")");
+        }
+
+        // ----- 4. Hit / miss -----
+        int  roll     = attack.rolledValue;
+        int  accuracy = actor.getAccuracy();
+        boolean hasRoll = roll > 0;
+        boolean hit  = !hasRoll || roll <= accuracy;   // unrolled attack = trust the caller
+        boolean miss = !hit;
+
+        // ----- 5. Damage numbers -----
+        int rawDamage   = attack.rolledDamage;
+        int finalDamage = attack.finalDamage;
+        if (rawDamage   <= 0) rawDamage   = rollDamage(profile);
+        if (finalDamage <= 0) finalDamage = rawDamage;
+
+        String areaLabel = profile.AreaType == -2 ? "Line"
+                : profile.AreaType >= 0  ? "Area (" + profile.AreaType + ")"
+                : "—";
+
+        LogMessage(String.format(
+                "AttackAction: %s rolls %d vs %d (%s) with %s [%s] - raw %d, final %d, Pen %d, %s",
+                actor.getName(), roll, accuracy, hit ? "HIT" : "MISS",
+                weapon != null ? weapon.getName() : "Unarmed",
+                profile.name, rawDamage, finalDamage, profile.Penetration, areaLabel));
+
+        // ----- 6. Apply to every hit sector -----
+        for (AttackAction.Hit h : attack.hitPositions) {
+
+            // Visual: red arrow on hit, grey on miss — always drawn so players
+            // can see where the attack went even when it whiffed.
+            DrawArrow(hit ? Color.DARKRED : Color.GRAY,
+                    actor.getX(), actor.getY(), h.x, h.y,
+                    Arrow.ArrowType.ACTION);
+
+            FieldUnit target = getUnitAt(h.x, h.y);
+            if (target == null) {
+                LogMessage("  " + CordsToText(h.x, h.y) + " is empty - no damage.");
+                continue;
+            }
+            if (target == actor) {
+                LogMessage("  skipping self at " + CordsToText(h.x, h.y));
+                continue;
+            }
+
+            // Non-area miss: nothing lands.
+            if (miss && profile.AreaType == -1) {
+                LogMessage("  " + target.getName() + ": missed, no damage.");
+                continue;
+            }
+
+            // Area/Line miss uses the halved value the popup already stored.
+            //TODO PENETRATION AND SHIT int dealt = applyAttackDamage(target, finalDamage, profile);
+
+          //  LogMessage("  " + target.getName() + " takes " + dealt
+          //          + " damage (toughness now "
+           //         + target.getToughness() + "/" + target.getMaxToughness() + ").");
+        }
+
+        // ----- 7. Queue -----
+        activateQueue(attack);
+        setActorToNext(attack);
+    }
+
+    /**
+     * Rolls a profile's damage pool: {@code Dice × dDicepower + Power}.
+     * Used only as a fallback when an action arrives without a pre-rolled value
+     * (e.g. an action authored outside the confirmation popup).
+     */
+    private int rollDamage(AttackProfile profile) {
+        if (profile == null || profile.Dice <= 0 || profile.Dicepower <= 0) return 0;
+        int total = profile.Power;
+        for (int i = 0; i < profile.Dice; i++) {
+            total += 1 + (int) (Math.random() * profile.Dicepower);
+        }
+        return total;
+    }
+
+    /**
+     * Applies one instance of damage to one target:
+     *   • subtract Armor (reduced by the profile's Penetration)
+     *   • push the remainder into the target's Toughness
+     *   • fire tech-specific on-hit riders carried by the weapon
+     *
+     * @return  the amount of damage that actually landed on Toughness.
+     */
+    private int applyAttackDamage(FieldUnit target, int damage, int penetration) {
+
+        int armor          = target.getArmor();
+        int pen            = penetration;
+        int effectiveArmor = Math.max(0, armor - pen);
+        int afterArmor     = Math.max(0, damage - effectiveArmor);
+
+        target.DealToughnessDamage(afterArmor);
+
+        return afterArmor;
+    }
+
+    /**
+     * Degrees of Success for a given roll vs the attacker's Accuracy.
+     * 1 DoS = roll beats the TN by 10 or more.
+     * Returns 0 when there was no roll.
+     */
+    private int computeDos(int roll, int accuracy) {
+        if (roll <= 0) return 0;
+        return Math.max(0, (accuracy - roll) / 10);
     }
 
     private void processMoveAction(MoveAction movement) {
@@ -886,6 +1045,120 @@ public class Game {
 
     }
 
+
+    /**
+     * Replaces whatever item is currently in the given slot of the target
+     * Evangelion with the {@link Weapon} carried inside the action.
+     *
+     * The DM client loads the weapon from disk when the command is issued;
+     * the object then travels through the GameState serialization like any
+     * other action payload, so the receiving side never needs file access.
+     */
+    private void processDMGiveWeaponAction(DMGiveWeaponAction action) {
+        DMQueueInsertion(action, "DM_GIVE_WEAPON");
+
+        FieldUnit target = getUnitFromName(action.getTargetUnitName());
+        if (target == null || !target.isExists()) {
+            LogMessage("DMGiveWeaponAction failed: unit '" + action.getTargetUnitName() + "' not found.");
+            return;
+        }
+        if (!(target.getUnit() instanceof Evangelion eva)) {
+            LogMessage("DMGiveWeaponAction failed: '" + target.getName() + "' is not an Evangelion.");
+            return;
+        }
+
+        Weapon weapon = action.getWeapon();
+        if (weapon == null) {
+            LogMessage("DMGiveWeaponAction failed: action carries no weapon.");
+            return;
+        }
+
+        List<Slot> slots = eva.getSlots();
+        int slotNum = action.getSlotNumber();
+        if (slotNum < 0 || slotNum >= slots.size()) {
+            LogMessage("DMGiveWeaponAction failed: slot " + slotNum
+                    + " out of range (0-" + (slots.size() - 1) + ").");
+            return;
+        }
+
+        Slot slot = slots.get(slotNum);
+        Item old = slot.getItem();
+        if (old != null) {
+            LogMessage("DMGiveWeaponAction: replacing '" + old.getName()
+                    + "' in slot " + slot.getName());
+        }
+        slot.setItem(weapon);
+        LogMessage("DMGiveWeaponAction: gave '" + weapon.getName()
+                + "' to " + target.getName()
+                + " in slot " + slot.getName() + " (#" + slotNum + ").");
+
+        if (target.getName().equals(currentPlayer)) {
+            rebuildInventoryTab();
+        }
+    }
+
+    /**
+     * Loads a serialized {@link Weapon} from {@code Active/weapons/}.
+     * Accepts the raw name (with spaces / punctuation), the already sanitized
+     * name, or a name ending in {@code .ser}.
+     *
+     * Only invoked by the DM client when issuing the giveWeapon command —
+     * the loaded weapon is then embedded in a {@link DMGiveWeaponAction} and
+     * shipped through the GameState.
+     *
+     * @return the weapon, or {@code null} if it could not be found / read.
+     */
+    private Weapon loadWeaponByName(String name) {
+        if (name == null || name.isBlank()) return null;
+
+        File dir = new File("Active/weapons");
+        if (!dir.isDirectory()) {
+            LogMessage("Weapon directory not found: " + dir.getAbsolutePath());
+            return null;
+        }
+
+        String trimmed = name.trim();
+        String sanitized = trimmed.replaceAll("[^a-zA-Z0-9]", "_");
+        List<String> candidates = new ArrayList<>();
+        candidates.add(trimmed);
+        if (!trimmed.toLowerCase().endsWith(".ser")) {
+            candidates.add(trimmed + ".ser");
+        }
+        candidates.add(sanitized);
+        candidates.add(sanitized + ".ser");
+
+        File file = null;
+        for (String candidate : candidates) {
+            File f = new File(dir, candidate);
+            if (f.isFile()) { file = f; break; }
+        }
+        if (file == null) return null;
+
+        try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(file))) {
+            Object obj = ois.readObject();
+            if (obj instanceof Weapon w) return w;
+            LogMessage("File '" + file.getName() + "' is not a Weapon ("
+                    + obj.getClass().getSimpleName() + ").");
+        } catch (IOException | ClassNotFoundException e) {
+            LogMessage("Failed to load weapon '" + file.getName() + "': " + e.getMessage());
+        }
+        return null;
+    }
+
+    /** Sanitized names (without .ser) of every weapon in Active/weapons/. */
+    private List<String> listAvailableWeaponFiles() {
+        File dir = new File("Active/weapons");
+        List<String> names = new ArrayList<>();
+        if (!dir.isDirectory()) return names;
+        File[] files = dir.listFiles((d, n) -> n.toLowerCase().endsWith(".ser"));
+        if (files == null) return names;
+        Arrays.sort(files, Comparator.comparing(File::getName));
+        for (File f : files) {
+            names.add(f.getName().substring(0, f.getName().length() - 4));
+        }
+        return names;
+    }
+
     private void processAddInitialPlayerAction(AddPlayerAction action) {
         LogMessage("Processing AddPlayer");
         QueuePosition current = getCurrentPosition();
@@ -921,14 +1194,6 @@ public class Game {
         int y = action.getY();
         Unit unit = action.getUnit();
         FieldUnit newUnit = createFieldUnit(playerName, unit, x, y, action.getTeam());
-
-        //TODO REMOVE:
-        Weapon w = Weapon.createBasicRangedWeapon("weapon", "SMG", Weapon.Tech.MASER, new ArrayList<>(), 5, Weapon.Hand.ONE_HANDED);
-        w.setDisplayIcon("weapon_4.png");
-        w.setMinRange(5);
-        w.setMaxRange(10);
-        w.WeaponProperties.add(Weapon.WeaponProperty.SMALL);
-        newUnit.getSlots().get(3).setItem(w);
 
 
         LogMessage("Created Evangelion for " + playerName + " at (" + x + "," + y + ")");
@@ -1054,9 +1319,7 @@ public class Game {
         });
         grid.setOnContextMenuRequested(event -> event.consume());
     }
-    private AttackProfile pendingAttackProfile = null;
-    private Weapon        pendingAttackWeapon  = null;
-    private Slot          pendingAttackSlot    = null;
+
 
     /**
      * Top-level click dispatcher. Decides which interaction mode is active and
@@ -1109,16 +1372,20 @@ public class Game {
         int dy = y - attackUnit.getY();
         int dist = Math.max(Math.abs(dx), Math.abs(dy));   // Chebyshev
 
-        int maxRange = activeAttackProfile.MaxRange;
+        AttackProfile combatProfile = modifyCombatProfile(activeAttackProfile);
+
+        int maxRange = combatProfile.MaxRange;
         if (dist > maxRange) {
             LocalMessage("Sector out of range (" + dist + " > max " + maxRange + ").");
             return;
         }
-        if (isAttackBelowMinRange(activeAttackProfile, dist)) {
+        if (isAttackBelowMinRange(combatProfile, dist)) {
             LocalMessage("Warning: sector is inside min range (" + dist
-                    + " < " + activeAttackProfile.MinRange
+                    + " < " + combatProfile.MinRange
                     + "). Attack will suffer the too-close penalty.");
         }
+
+
 
         // Preview arrow on the main board
         clearPreviewArrows();
@@ -1133,17 +1400,13 @@ public class Game {
         // Build the pending AttackAction (works for empty or occupied sectors)
         AttackAction atk = new AttackAction(currentActionNumber, attackUnit.getName());
         atk.addHit(x, y);
-        atk.weaponName     = (selectedAttackWeapon != null)     ? selectedAttackWeapon.getName() : null;
-        atk.weaponSlotName = (selectedAttackWeaponSlot != null) ? selectedAttackWeaponSlot.getName() : null;
-        atk.profileName    = activeAttackProfile.name;
-        atk.ammoCost       = activeAttackProfile.AmmoCost;
-        atk.ATPCost        = activeAttackProfile.ATP;
-        atk.staminaCost    = activeAttackProfile.Stamina;
+        atk.slotNumber = (selectedAttackWeaponSlot != null) ? attackUnit.getSlots().indexOf(selectedAttackWeaponSlot) : -1;
 
-        // Stash for the confirm popup
-        pendingAttackProfile = activeAttackProfile;
-        pendingAttackWeapon  = selectedAttackWeapon;
-        pendingAttackSlot    = selectedAttackWeaponSlot;
+
+
+        atk.actionCombatProfile = combatProfile;
+        atk.ATPCost        = combatProfile.ATP;
+        atk.staminaCost    = combatProfile.Stamina;
 
         confirmAction = atk;
 
@@ -1156,6 +1419,18 @@ public class Game {
                 : "Attack pending on empty sector " + CordsToText(x, y) + ". Click Confirm to finalise.");
     }
 
+
+    //Weapon profile handles all things that relate to the weapon but do not depend on the roll results. Creating combat profile will copy it to
+    //create a version thats influenced by Evangelion's effects and Predicate options
+    private AttackProfile modifyCombatProfile(
+            AttackProfile weaponProfile) {
+     return weaponProfile.copy();
+    }
+    private AttackProfile turnIntoCombatProfile(
+            AttackProfile weaponProfile, FieldUnit unit) {
+        weaponProfile.Power+=unit.getAttackStrength();
+        return weaponProfile;
+    }
 // ------------------------------------------------------------------
 //   MOVEMENT MODE
 // ------------------------------------------------------------------
@@ -1272,9 +1547,12 @@ public class Game {
             }
         }
         // ---- NEW: Attack branch ----
-        if (action instanceof AttackAction) {
-            showAttackConfirmPopup((AttackAction) action,
-                    pendingAttackProfile, pendingAttackWeapon, pendingAttackSlot);
+        if (action instanceof AttackAction atk) {
+            FieldUnit u = getUnitFromName(atk.getActor());
+            if (atk.slotNumber != -1) {
+            showAttackConfirmPopup(atk,
+                    atk.getActionCombatProfile(), (Weapon) u.getSlots().get(atk.slotNumber).getItem(), u.getSlots().get(atk.slotNumber));}
+            else showAttackConfirmPopup(atk, atk.getActionCombatProfile(), null, null);
             return;
         }
 
@@ -1365,117 +1643,168 @@ public class Game {
                         "-fx-background-radius: 8;" +
                         "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.4), 12, 0, 0, 4);");
 
-        Scene scene = new Scene(content, 560, 640);
+        Scene scene = new Scene(content, 540, 600);
         scene.setFill(Color.TRANSPARENT);
 
         Label titleLabel = new Label("Confirm Attack");
         titleLabel.setStyle("-fx-font-size: 16px; -fx-font-weight: bold;");
 
-        StringBuilder hitsText = new StringBuilder(attacker.getName())
-                .append(": ").append(CordsToText(attacker.getX(), attacker.getY()))
-                .append("  →  ");
+        // ---- Target line (no start/end position) ----
+        StringBuilder targetText = new StringBuilder();
         for (int i = 0; i < action.hitPositions.size(); i++) {
             AttackAction.Hit h = action.hitPositions.get(i);
-            if (i > 0) hitsText.append(", ");
-            hitsText.append(CordsToText(h.x, h.y));
+            if (i > 0) targetText.append(", ");
             FieldUnit hU = getUnitAt(h.x, h.y);
-            if (hU != null) hitsText.append(" (").append(hU.getName()).append(")");
+            if (hU != null) targetText.append(hU.getName()).append("  ").append(CordsToText(h.x, h.y));
+            else            targetText.append(CordsToText(h.x, h.y));
         }
-        Label posLabel = new Label(hitsText.toString());
-        posLabel.setStyle("-fx-font-size: 13px; -fx-text-fill: #333;");
-        posLabel.setWrapText(true);
-        posLabel.setMaxWidth(500);
+        Label targetLabel = new Label("Target: " + targetText);
+        targetLabel.setStyle("-fx-font-size: 13px; -fx-text-fill: #333;");
 
-        GridPane statusGrid = new GridPane();
-        statusGrid.setHgap(15);
-        statusGrid.setVgap(4);
-        statusGrid.setStyle("-fx-background-color: #f4f4f4; -fx-padding: 8;" +
+        // ---- Compact profile summary ----
+        Label profileLabel = new Label(describeProfileForPopup(profile, weapon));
+        profileLabel.setStyle("-fx-font-size: 15px; -fx-font-weight: bold; -fx-text-fill: #1a1a4d;");
+
+        // ---- Cost row (Stamina / ATP / Ammo) ----
+        HBox costRow = new HBox(20);
+        costRow.setAlignment(Pos.CENTER);
+        costRow.setStyle("-fx-background-color: #f4f4f4; -fx-padding: 10; " +
                 "-fx-border-color: #cccccc; -fx-border-width: 1;");
-        statusGrid.add(new Label("Stamina:"), 0, 0);
-        statusGrid.add(new Label(attacker.getStamina() + " / " + attacker.getMaxStamina()), 1, 0);
-        statusGrid.add(new Label("ATP:"), 0, 1);
-        statusGrid.add(new Label(attacker.getATP() + " / " + attacker.getMaxATP()), 1, 1);
-        statusGrid.add(new Label("Profile Stamina cost:"), 0, 2);
-        statusGrid.add(new Label(String.valueOf(profile.Stamina)), 1, 2);
-        if (profile.ATP > 0) {
-            statusGrid.add(new Label("Profile ATP cost:"), 0, 3);
-            statusGrid.add(new Label(String.valueOf(profile.ATP)), 1, 3);
+
+        Label staminaCost = new Label("Stamina: " + profile.Stamina);
+        staminaCost.setStyle("-fx-font-weight: bold; -fx-font-size: 13px; -fx-text-fill: " +
+                (attacker.getStamina() < profile.Stamina ? "#b00020" : "#2e7d32") + ";");
+        costRow.getChildren().add(staminaCost);
+
+        Label atpCost = new Label("ATP: " + profile.ATP);
+        atpCost.setStyle("-fx-font-weight: bold; -fx-font-size: 13px; -fx-text-fill: " +
+                (attacker.getATP() < profile.ATP ? "#b00020" : "#2e7d32") + ";");
+        costRow.getChildren().add(atpCost);
+
+        if (weapon != null && (weapon.isRanged() || profile.AmmoCost > 0)) {
+            int remaining = weapon.getAmmo() - profile.AmmoCost;
+            Label ammoCost = new Label("Ammo: " + profile.AmmoCost
+                    + "  (" + weapon.getAmmo() + "/" + weapon.getMaxAmmo() + ")");
+            ammoCost.setStyle("-fx-font-weight: bold; -fx-font-size: 13px; -fx-text-fill: " +
+                    (remaining < 0 ? "#b00020" : "#2e7d32") + ";");
+            costRow.getChildren().add(ammoCost);
         }
 
-        VBox weaponBox = new VBox(4);
-        weaponBox.setStyle("-fx-background-color: #fff2f2; -fx-padding: 8;" +
-                "-fx-border-color: #cc8888; -fx-border-width: 1;");
-        if (weapon != null) {
-            Label wName = new Label("Weapon: " + weapon.getName()
-                    + (slot != null ? "  (" + slot.getName() + ")" : ""));
-            wName.setStyle("-fx-font-weight: bold;");
-            weaponBox.getChildren().add(wName);
-            if (weapon.isRanged() || profile.AmmoCost > 0) {
-                int remaining = weapon.getAmmo() - profile.AmmoCost;
-                Label ammo = new Label("Ammo:  " + weapon.getAmmo() + " / " + weapon.getMaxAmmo()
-                        + "      Cost: " + profile.AmmoCost);
-                ammo.setStyle("-fx-font-weight: bold; -fx-text-fill: "
-                        + (remaining < 0 ? "#b00020" : "#2e7d32") + ";");
-                weaponBox.getChildren().add(ammo);
-            }
-        } else {
-            Label wName = new Label("Weapon: Neutral (Unarmed)");
-            wName.setStyle("-fx-font-weight: bold;");
-            weaponBox.getChildren().add(wName);
-        }
+        // ---- Results panel ----
+        VBox resultsBox = new VBox(8);
+        resultsBox.setAlignment(Pos.CENTER);
+        resultsBox.setStyle("-fx-background-color: #fafafa; -fx-padding: 14; " +
+                "-fx-border-color: #dddddd; -fx-border-width: 1;");
+        resultsBox.setMinHeight(180);
 
-        TextArea descArea = new TextArea();
-        descArea.setEditable(false);
-        descArea.setWrapText(true);
-        descArea.setPrefRowCount(8);
-        descArea.setPrefWidth(500);
-        descArea.setText(describeProfileFull(profile));
+        Label accuracyHeader = new Label("Accuracy");
+        accuracyHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #666;");
+        Label accuracyResult = new Label("Target: " + attacker.getAccuracy());
+        accuracyResult.setStyle("-fx-font-size: 20px; -fx-font-weight: bold; -fx-text-fill: #333;");
 
-        Label rollHeader = new Label("Attack Roll (1–100):");
-        rollHeader.setStyle("-fx-font-weight: bold;");
-        Label rollValue = new Label("—");
-        rollValue.setStyle("-fx-font-size: 24px; -fx-font-weight: bold; -fx-text-fill: #8b0000;");
+        Label damageHeader = new Label("Damage");
+        damageHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #666;");
+        Label damageResult = new Label("—");
+        damageResult.setStyle("-fx-font-size: 20px; -fx-font-weight: bold; -fx-text-fill: #333;");
 
-        BetterButton rollBtn = new BetterButton("Roll d100");
+        Label areaNote = new Label("");
+        areaNote.setStyle("-fx-font-size: 12px; -fx-text-fill: #b00020; -fx-font-style: italic;");
+        areaNote.setWrapText(true);
+        areaNote.setMaxWidth(460);
+
+        resultsBox.getChildren().addAll(
+                accuracyHeader, accuracyResult,
+                new Separator(),
+                damageHeader, damageResult,
+                areaNote);
+
+        // ---- Buttons ----
+        BetterButton rollBtn = new BetterButton("ROLL ATTACK");
         rollBtn.setPrimaryStyle();
-        final int[] rolled = {0};
+        rollBtn.setPrefWidth(220);
+        rollBtn.setPrefHeight(40);
+        rollBtn.setStyle(rollBtn.getStyle() +
+                "-fx-font-size: 14px; -fx-font-weight: bold; -fx-background-color: #8b0000; -fx-text-fill: white;");
 
         BetterButton proceedBtn = new BetterButton("Proceed");
         proceedBtn.setSuccessStyle();
         proceedBtn.setDisable(true);
 
+        BetterButton cancelBtn = new BetterButton("Cancel");
+        cancelBtn.setDangerStyle();
+        cancelBtn.setOnAction(e -> popupStage.close());
+
+        final int[] rolledAttack   = {0};
+        final int[] rolledDamage   = {0};
+        final int[] finalDamage    = {0};
+        final int[] techBonusOut   = {0};
+
         rollBtn.setOnAction(e -> {
-            int r = 1 + (int) (Math.random() * 100);
-            rolled[0] = r;
-            rollValue.setText(String.valueOf(r));
+            // -- Attack roll --
+            int roll = 1 + (int) (Math.random() * 100);
+            rolledAttack[0] = roll;
+            int accuracy = attacker.getAccuracy();
+            boolean hit = roll <= accuracy;
+
+            accuracyResult.setText(roll + (hit ? "  <  " : "  >  ") + accuracy);
+            accuracyResult.setStyle("-fx-font-size: 20px; -fx-font-weight: bold; -fx-text-fill: "
+                    + (hit ? "#2e7d32" : "#b00020") + ";");
+
+            // -- Damage roll --
+            int dmg = 0;
+            for (int i = 0; i < profile.Dice; i++) {
+                dmg += 1 + (int) (Math.random() * profile.Dicepower);
+            }
+            dmg += profile.Power;
+
+            // -- Tech-driven bonus damage (currently only Gauss) --
+            int techBonus = computeTechDamageBonus(weapon, roll, accuracy, hit);
+            techBonusOut[0] = techBonus;
+            rolledDamage[0] = dmg + techBonus;
+
+            // -- Area / Line half-damage on miss --
+            int displayed = rolledDamage[0];
+            if (!hit && profile.AreaType != -1) {
+                int halved = (int) Math.ceil(displayed / 2.0);
+                finalDamage[0] = halved;
+                String areaName = (profile.AreaType == -2) ? "Line" : "Area";
+                areaNote.setText(areaName + " weapons deal half-damage on miss:   "
+                        + displayed + "  →  " + halved);
+                damageResult.setText(halved + "  (+" + profile.Penetration + " Pen)");
+            } else {
+                finalDamage[0] = displayed;
+                damageResult.setText(displayed + "  (+" + profile.Penetration + " Pen)"
+                        + (techBonus > 0 ? "   [tech +" + techBonus + "]" : ""));
+            }
+            damageResult.setStyle("-fx-font-size: 20px; -fx-font-weight: bold; -fx-text-fill: "
+                    + (hit ? "#2e7d32" : "#555") + ";");
+
+            // -- Lock the popup --
+            rollBtn.setDisable(true);
+            cancelBtn.setDisable(true);
             proceedBtn.setDisable(false);
         });
 
-        HBox rollRow = new HBox(10, rollBtn, rollValue);
-        rollRow.setAlignment(Pos.CENTER);
-
         proceedBtn.setOnAction(e -> {
-            action.rolledValue = rolled[0];
+            action.rolledValue    = rolledAttack[0];
+            action.rolledDamage   = rolledDamage[0];
+            action.finalDamage    = finalDamage[0];
+            action.techDamageBonus = techBonusOut[0];
             SendAction(action);
             clearAttackVisualization();
-            pendingAttackProfile = null;
-            pendingAttackWeapon  = null;
-            pendingAttackSlot    = null;
             confirmAction = null;
             confirmContainer.getChildren().clear();
             popupStage.close();
         });
 
-        BetterButton cancelBtn = new BetterButton("Cancel");
-        cancelBtn.setDangerStyle();
-        cancelBtn.setOnAction(e -> popupStage.close());
-
         HBox btnBox = new HBox(10, cancelBtn, proceedBtn);
         btnBox.setAlignment(Pos.CENTER);
 
-        content.getChildren().addAll(titleLabel, posLabel, statusGrid, weaponBox,
-                descArea, rollHeader, rollRow, btnBox);
+        content.getChildren().addAll(
+                titleLabel, targetLabel, profileLabel,
+                costRow, rollBtn, resultsBox, btnBox);
 
+        // Draggable borderless window
         final double[] dragOffset = new double[2];
         content.setOnMousePressed(e -> {
             dragOffset[0] = e.getSceneX();
@@ -1489,6 +1818,53 @@ public class Game {
         popupStage.setScene(scene);
         popupStage.show();
     }
+
+    /**
+     * Compact one-line profile summary for the attack popup.
+     * Shows dice, power, penetration and a tech marker where relevant.
+     * Example: "2d6+2  |  Pen 3  |  Rng 2-5  |  Gauss +DoS"
+     */
+    private String describeProfileForPopup(AttackProfile p, Weapon weapon) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(p.Dice).append("d").append(p.Dicepower);
+        if (p.Power != 0) sb.append(p.Power > 0 ? "+" : "").append(p.Power);
+        sb.append("   |   Pen ").append(p.Penetration);
+
+        if (p.AreaType == -2)     sb.append("   |   Line");
+        else if (p.AreaType >= 0) sb.append("   |   Area ").append(p.AreaType);
+
+        if (p.Ranged) sb.append("   |   Rng ").append(p.MinRange).append("-").append(p.MaxRange);
+        else if (p.MaxRange > 1) sb.append("   |   Reach ").append(p.MaxRange);
+
+        if (weapon != null) {
+            switch (weapon.getCurrentTech()) {
+                case GAUSS -> sb.append("   |   +d (Gauss)");
+                case POLYTHERMIC -> { if (weapon.isActiveTech()) sb.append("   |   OVERHEAT"); }
+                case SUPERCONDUCTIVE -> sb.append("   |   even/odd → -10");
+                case N2SHELL  -> { if (weapon.isActiveTech()) sb.append("   |   N2 Active"); }
+                case MASER    -> { if (weapon.isActiveTech()) sb.append("   |   Maser Active"); }
+                default -> { }
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Tech-driven flat damage bonus applied on top of the rolled profile damage.
+     * Only Gauss is currently modelled: +1 damage per DoS, capped at +3.
+     * Extend this switch as more techs are implemented.
+     */
+    private int computeTechDamageBonus(Weapon weapon, int roll, int accuracy, boolean hit) {
+        if (weapon == null || !hit) return 0;
+        switch (weapon.getCurrentTech()) {
+            case GAUSS -> {
+                int dos = Math.max(0, (accuracy - roll) / 10);
+                return Math.min(3, dos);
+            }
+            default -> { return 0; }
+        }
+    }
+
     // ============================================================
 //   ATTACK CHOOSER
 // ============================================================
@@ -1512,12 +1888,12 @@ public class Game {
     /**
      * True when the weapon has a technology that can be toggled on/off via
      * {@link Weapon#SetActivateTech(boolean)}. Currently only N2 Shell and Maser
-     * consume the activation flag inside {@link Weapon#getWeaponProfiles()}.
+     * consume the activation flag inside {@link Weapon#getWeaponProfiles(eva.evangelion.items.Weapon.Weapon.Tech)}.
      */
     private boolean hasActivatableTech(Weapon weapon) {
         if (weapon == null) return false;
-        return weapon.CurrentTech == Weapon.Tech.N2SHELL
-                || weapon.CurrentTech == Weapon.Tech.MASER;
+        return weapon.getCurrentTech() == Weapon.Tech.N2SHELL
+                || weapon.getCurrentTech() == Weapon.Tech.MASER;
     }
 
     private void rebuildWeaponChooser() {
@@ -1549,6 +1925,7 @@ public class Game {
             clearAttackVisualization();
             rebuildWeaponChooser();
             rebuildAttackMenu();
+            autoSelectFirstProfile();
         });
         attackWeaponChooserContainer.addNode(neutralBtn);
 
@@ -1574,13 +1951,14 @@ public class Game {
                     clearAttackVisualization();
                     rebuildWeaponChooser();
                     rebuildAttackMenu();
+                    autoSelectFirstProfile();
                 });
                 attackWeaponChooserContainer.addNode(slotBtn);
             }
             // ---- Tech-activation checkbox (only for N2 Shell / Maser) ----
             if (selectedAttackWeapon != null && hasActivatableTech(selectedAttackWeapon)) {
                 Weapon w = selectedAttackWeapon;
-                String techName = (w.CurrentTech == Weapon.Tech.N2SHELL)
+                String techName = (w.getCurrentTech() == Weapon.Tech.N2SHELL)
                         ? "N2 Shell" : "Maser";
 
                 CheckBox activateTechCb = new CheckBox("Activate " + techName);
@@ -1590,7 +1968,7 @@ public class Game {
                                 "-fx-text-fill: #8b0000;" +
                                 "-fx-padding: 8 0 0 4;");
                 activateTechCb.setTooltip(new Tooltip(
-                        w.CurrentTech == Weapon.Tech.N2SHELL
+                        w.getCurrentTech() == Weapon.Tech.N2SHELL
                                 ? "N2 Shell: spend 1 extra Ammo to increase the Area rating by 1."
                                 : "Maser: spend 1 extra Ammo to gain Line and +1 additional Penetration."));
                 activateTechCb.setOnAction(e -> {
@@ -1642,6 +2020,7 @@ public class Game {
             List<AttackProfile> u = unit.getUnitAttackProfiles();
             if (u != null) profiles.addAll(u);
         }
+        for (AttackProfile prof : profiles) turnIntoCombatProfile(prof, unit);
 
         if (profiles.isEmpty()) {
             Label empty = new Label("No attack profiles available.");
@@ -1669,6 +2048,30 @@ public class Game {
             profileBox.getChildren().addAll(btn, descLabel);
             attackScrollContainer.addNode(profileBox);
         }
+    }
+
+    /**
+     * Builds the profile list for the currently-selected weapon (or unarmed if
+     * none) and, if there is one, kicks off the visualization for the first
+     * profile. Safe to call repeatedly; startAttackVisualization() is a no-op if
+     * the profile is already active.
+     */
+    private void autoSelectFirstProfile() {
+        FieldUnit unit = findUnitSilent(currentPlayer);
+        if (unit == null || !unit.isExists()) return;
+
+        List<AttackProfile> profiles = new ArrayList<>();
+        if (selectedAttackWeapon != null) {
+            List<AttackProfile> w = selectedAttackWeapon.getWeaponProfiles(
+                    selectedAttackWeapon.getCurrentTech());
+            if (w != null) profiles.addAll(w);
+        } else {
+            List<AttackProfile> u = unit.getUnitAttackProfiles();
+            if (u != null) profiles.addAll(u);
+        }
+        if (profiles.isEmpty()) return;
+
+        startAttackVisualization(profiles.get(0));
     }
 
     private String describeProfileShort(AttackProfile p) {
@@ -1791,9 +2194,6 @@ public class Game {
         attackModeActive = false;
         activeAttackProfile = null;
         attackUnit = null;
-        pendingAttackProfile = null;
-        pendingAttackWeapon  = null;
-        pendingAttackSlot    = null;
         clearPreviewArrows();
         clearVisualisationLayer();
     }
@@ -2253,7 +2653,7 @@ public class Game {
         if (command == null || command.trim().isEmpty()) return;
         String[] parts = command.trim().split(" ");
         String action = parts[0].toLowerCase();
-        if (action.startsWith("/")) action = action.substring(1);   // NEW: tolerate "/showAllUnits"
+        if (action.startsWith("/")) action = action.substring(1);
         switch (action) {
             case "create":
                 if (parts.length < 4) {
@@ -2297,6 +2697,80 @@ public class Game {
                 SendAction(createAction);
                 output.appendText("Sent DMCreateUnitAction for '" + name + "' at ("
                         + x + ", " + y + ") team=" + team + ".\n");
+                break;
+            case "giveweapon":
+                // Form 1: giveWeapon <slotNum> <weaponName>               → current player's unit
+                // Form 2: giveWeapon <unitName> <slotNum> <weaponName>    → named unit
+                if (parts.length < 3) {
+                    output.appendText("Error: Usage: giveWeapon <slotNum> <weaponName>\n");
+                    output.appendText("       giveWeapon <unitName> <slotNum> <weaponName>\n");
+                    output.appendText("Available weapons: " + String.join(", ",
+                            listAvailableWeaponFiles()) + "\n");
+                    return;
+                }
+
+                String gwUnitName;
+                int    gwSlotNum;
+                String gwWeaponName;
+
+                if (parts.length == 3) {
+                    gwUnitName = currentPlayer;
+                    try {
+                        gwSlotNum = Integer.parseInt(parts[1]);
+                    } catch (NumberFormatException ex) {
+                        output.appendText("Error: slot number must be an integer.\n");
+                        return;
+                    }
+                    gwWeaponName = parts[2];
+                } else {
+                    gwUnitName = parts[1];
+                    try {
+                        gwSlotNum = Integer.parseInt(parts[2]);
+                    } catch (NumberFormatException ex) {
+                        output.appendText("Error: slot number must be an integer.\n");
+                        return;
+                    }
+                    StringBuilder wn = new StringBuilder();
+                    for (int j = 3; j < parts.length; j++) {
+                        if (j > 3) wn.append(" ");
+                        wn.append(parts[j]);
+                    }
+                    gwWeaponName = wn.toString();
+                }
+
+                if (gwWeaponName == null || gwWeaponName.isBlank()) {
+                    output.appendText("Error: weapon name cannot be empty.\n");
+                    return;
+                }
+
+                // ---- DM-side validation against the live world ----
+                FieldUnit gwTarget = getUnitFromName(gwUnitName);
+                if (gwTarget == null || !(gwTarget.getUnit() instanceof Evangelion)) {
+                    output.appendText("Error: no Evangelion named '" + gwUnitName + "'.\n");
+                    return;
+                }
+                int slotCount = ((Evangelion) gwTarget.getUnit()).getSlots().size();
+                if (gwSlotNum < 0 || gwSlotNum >= slotCount) {
+                    output.appendText("Error: slot " + gwSlotNum
+                            + " out of range (0-" + (slotCount - 1) + ").\n");
+                    return;
+                }
+
+                // ---- DM-side disk load; the object rides inside the action ----
+                Weapon gwWeapon = loadWeaponByName(gwWeaponName);
+                if (gwWeapon == null) {
+                    output.appendText("Error: could not load weapon '" + gwWeaponName
+                            + "' from Active/weapons/.\n");
+                    output.appendText("Available: " + String.join(", ",
+                            listAvailableWeaponFiles()) + "\n");
+                    return;
+                }
+
+                DMGiveWeaponAction gwAction = new DMGiveWeaponAction(
+                        currentActionNumber, "DM", gwUnitName, gwSlotNum, gwWeapon);
+                SendAction(gwAction);
+                output.appendText("Sent DMGiveWeaponAction: '" + gwWeapon.getName()
+                        + "' → " + gwUnitName + " slot #" + gwSlotNum + ".\n");
                 break;
             case "round":
                 EndRoundAction action1 = new EndRoundAction(
@@ -2430,7 +2904,50 @@ public class Game {
                 output.appendText("Manually reloading GameState and processing new actions...\n");
                 reloadGameState();
                 break;
-
+            case "weapons":
+                // List every weapon file in Active/weapons/, together with a
+                // short summary of its key stats so the DM can pick one to
+                // give out via the giveWeapon command.
+                output.appendText("Saved weapons in Active/weapons/:\n");
+                File wdir = new File("Active/weapons");
+                if (!wdir.isDirectory()) {
+                    output.appendText("  (directory does not exist)\n");
+                    break;
+                }
+                File[] weaponFiles = wdir.listFiles((d, n) -> n.toLowerCase().endsWith(".ser"));
+                if (weaponFiles == null || weaponFiles.length == 0) {
+                    output.appendText("  (no weapons saved)\n");
+                    break;
+                }
+                Arrays.sort(weaponFiles, Comparator.comparing(File::getName));
+                for (File wf : weaponFiles) {
+                    String baseName = wf.getName().substring(0, wf.getName().length() - 4);
+                    Weapon preview = loadWeaponForPreview(wf);
+                    if (preview == null) {
+                        output.appendText("  " + baseName + "   (unreadable)\n");
+                        continue;
+                    }
+                    StringBuilder line = new StringBuilder();
+                    line.append("  ").append(baseName);
+                    line.append("   [").append(preview.getProfileType()).append("]");
+                    if (preview.isRanged()) {
+                        line.append("  Rng ").append(preview.getMinRange())
+                                .append("-").append(preview.getMaxRange())
+                                .append("  Ammo ").append(preview.getMaxAmmo());
+                    } else if (preview.getMaxRange() > 1) {
+                        line.append("  Reach ").append(preview.getMaxRange());
+                    }
+                    if (!preview.Technology.isEmpty()
+                            && preview.getCurrentTech() != Weapon.Tech.NONE) {
+                        line.append("  Tech ").append(preview.getCurrentTech());
+                    }
+                    if (!preview.WeaponProperties.isEmpty()) {
+                        line.append("  ").append(preview.WeaponProperties);
+                    }
+                    line.append("\n");
+                    output.appendText(line.toString());
+                }
+                break;
             case "help":
                 output.appendText("Available commands:\n");
                 output.appendText("  create <name> <x> <y> [team]  – creates a new unit (optional team)\n");
@@ -2442,14 +2959,134 @@ public class Game {
                 output.appendText("  actions                – shows all actions and their numbers in gamestate\n");
                 output.appendText("  help                   – shows this help\n");
                 output.appendText("  team <name> <teamNumber> – switches a unit to another team\n");
-                output.appendText("  /showAllUnits          – toggle showing finished units in the next-turn list\n");
+                output.appendText("  showAllUnits          – toggle showing finished units in the next-turn list\n");
                 output.appendText("  round                  – Ends the round forcefully\n");
+                output.appendText("  giveWeapon <slot> <weapon>            – replace current player's slot with a saved weapon\n");
+                output.appendText("  giveWeapon <unit> <slot> <weapon>     – same, but for a named unit\n");
+                output.appendText("  weapons                – list all saved weapons in Active/weapons/\n");
                 break;
 
             default:
                 output.appendText("Unknown command: " + action + ". Type 'help' for a list.\n");
                 break;
         }
+    }
+
+    /**
+     * Deserializes a single weapon file for display purposes only.
+     * Never throws; returns {@code null} on any problem so the listing
+     * command can print "(unreadable)" and carry on.
+     */
+    private Weapon loadWeaponForPreview(File file) {
+        if (file == null || !file.isFile()) return null;
+        try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(file))) {
+            Object obj = ois.readObject();
+            return (obj instanceof Weapon w) ? w : null;
+        } catch (IOException | ClassNotFoundException e) {
+            LogMessage("Preview load failed for '" + file.getName() + "': " + e.getMessage());
+            return null;
+        }
+    }
+    /**
+     * Builds the text shown in the inventory description pane when an item is
+     * clicked. For weapons this assembles a formatted block from the weapon's
+     * own fields (type, hands, range, tech, properties, customisations, …);
+     * for any other item it falls back to the item's own getDescription(),
+     * or to the name if that comes back blank.
+     */
+    private String describeItemForInventory(Item item) {
+        if (item == null) return "Empty slot.";
+        if (item instanceof Weapon w) return describeWeaponForInventory(w);
+        String desc = item.getDescription();
+        return (desc == null || desc.isBlank()) ? item.getName() : desc;
+    }
+
+    /** Formatted multi-line description of a single weapon. */
+    private String describeWeaponForInventory(Weapon w) {
+        StringBuilder sb = new StringBuilder();
+
+        // ---- Header: name + type + hands + ranged/melee ----
+        sb.append(w.getName()).append("\n");
+        sb.append(w.getProfileType());
+
+        String hands = switch (w.getHands()) {
+            case ONE_HANDED -> "  (One-Handed)";
+            case TWO_HANDED -> "  (Two-Handed)";
+            case NONE       -> "";
+        };
+        sb.append(hands);
+        sb.append(w.isRanged() ? "  •  Ranged" : "  •  Melee");
+        sb.append("\n");
+        sb.append("────────────────────────────\n");
+
+        // ---- Range / ammo ----
+        if (w.isRanged()) {
+            sb.append("Range:  ").append(w.getMinRange())
+                    .append(" – ").append(w.getMaxRange()).append("\n");
+            sb.append("Ammo:   ").append(w.getAmmo())
+                    .append(" / ").append(w.getMaxAmmo()).append("\n");
+        } else if (w.getMaxRange() > 1) {
+            sb.append("Reach:  ").append(w.getMaxRange()).append("\n");
+        }
+
+        // ---- Tech ----
+        if (w.Technology != null && !w.Technology.isEmpty()
+                && w.getCurrentTech() != Weapon.Tech.NONE) {
+            sb.append("Tech:   ").append(w.getCurrentTech());
+            if (w.isActiveTech()) sb.append("  [ACTIVE]");
+            sb.append("\n");
+        }
+
+        // ---- Base combat stats ----
+        if (w.getBasePenetration() > 0)
+            sb.append("Penetration:  +").append(w.getBasePenetration()).append("\n");
+
+        if (w.getBaseArea() == -2) {
+            sb.append("Area:   Line\n");
+        } else if (w.getBaseArea() >= 0) {
+            sb.append("Area:   ").append(w.getBaseArea()).append("\n");
+        }
+
+        if (w.getDefensive() > 0)
+            sb.append("Defensive:  ").append(w.getDefensive()).append("\n");
+
+        // ---- Properties ----
+        if (w.WeaponProperties != null && !w.WeaponProperties.isEmpty()) {
+            sb.append("\nProperties:\n");
+            for (Weapon.WeaponProperty p : w.WeaponProperties) {
+                sb.append("  • ").append(prettifyEnum(p.name())).append("\n");
+            }
+        }
+
+        // ---- Customisations ----
+        if (w.Customisations != null && !w.Customisations.isEmpty()) {
+            sb.append("\nCustomisations:\n");
+            for (Weapon.Customisation c : w.Customisations) {
+                sb.append("  • ").append(prettifyEnum(c.name())).append("\n");
+            }
+        }
+
+        // ---- Optional flavour text from the item itself ----
+        String flavour = w.getDescription();
+        if (flavour != null && !flavour.isBlank()) {
+            sb.append("\n").append(flavour);
+        }
+
+        return sb.toString();
+    }
+
+    /** Turns "ONE_HANDED" / "TELESCOPIC_SIGHT" into "One Handed" / "Telescopic Sight". */
+    private static String prettifyEnum(String enumName) {
+        if (enumName == null) return "";
+        String[] words = enumName.toLowerCase().split("_");
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < words.length; i++) {
+            if (words[i].isEmpty()) continue;
+            if (sb.length() > 0) sb.append(' ');
+            sb.append(Character.toUpperCase(words[i].charAt(0)))
+                    .append(words[i].substring(1));
+        }
+        return sb.toString();
     }
 
 
@@ -3503,11 +4140,7 @@ public class Game {
 
         // Click on box shows description
         box.setOnMouseClicked(e -> {
-            if (currentItem != null) {
-                descriptionLabel.setText(currentItem.getDescription());
-            } else {
-                descriptionLabel.setText("Empty slot.");
-            }
+            descriptionLabel.setText(describeItemForInventory(currentItem));
         });
 
         // Drop target for items
@@ -4145,8 +4778,10 @@ public class Game {
             atPowerScrollContainer.setVisible(false);
             otherScrollContainer.setVisible(false);
             attackWeaponChooserContainer.setVisible(true);
+            autoSelectFirstWeapon();
             rebuildWeaponChooser();
             rebuildAttackMenu();
+            autoSelectFirstProfile();
         });
         atPowerBtn.setOnAction(e -> {
             clearAttackVisualization();
@@ -4176,7 +4811,7 @@ public class Game {
         //  Hidden until Attack mode is toggled on.
         // ============================================================
         attackWeaponChooserContainer = new ScrollableContainer(
-                0.01, 0.10, 0.02, 0.3, false, false);
+                0.01, 0.2, 0.02, 0.3, false, false);
         attackWeaponChooserContainer.setContainerPadding(new Insets(10));
         attackWeaponChooserContainer.setSpacing(6);
 
@@ -4209,6 +4844,22 @@ public class Game {
 
     }
 
+    /**
+     * If no weapon is currently selected, pick the first usable one from the
+     * current player's slots. Does nothing if the player already made a choice.
+     */
+    private void autoSelectFirstWeapon() {
+        if (selectedAttackWeapon != null) return;
+        FieldUnit unit = findUnitSilent(currentPlayer);
+        if (unit == null || !unit.isExists() || unit.getSlots() == null) return;
+        for (Slot s : unit.getSlots()) {
+            if (s.isActive() && s.isIntact() && s.getItem() instanceof Weapon w) {
+                selectedAttackWeapon = w;
+                selectedAttackWeaponSlot = s;
+                return;
+            }
+        }
+    }
 
     // ============================================================
 //   CURRENT-STATS CONTAINERS

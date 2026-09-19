@@ -686,9 +686,9 @@ public class WeaponCreatorUI extends Pane {
         w.setRanged(currentType.ranged);
         w.setAmmo(currentType.ammo);
         w.setMaxAmmo(currentType.ammo);
-        w.CurrentTech = primaryTech;
+        w.doesNormalProfiles = true;
         w.Technology.clear();
-        if (primaryTech != Weapon.Tech.NONE) w.Technology.add(primaryTech);
+        w.Technology.add(primaryTech);
 
         w.WeaponProperties.addAll(currentType.baseProperties);
         w.setBasePenetration(currentType.basePenetration);
@@ -807,10 +807,10 @@ public class WeaponCreatorUI extends Pane {
 
     private int getTechPenetrationBonus(Weapon w) {
         int bonus = 0;
-        if (w.CurrentTech == Weapon.Tech.PROGRESSIVE || w.CurrentTech == Weapon.Tech.POSITRON) {
+        if (w.getCurrentTech() == Weapon.Tech.PROGRESSIVE || w.getCurrentTech() == Weapon.Tech.POSITRON) {
             bonus += 2;
-        } else if (w.CurrentTech == Weapon.Tech.POLYTHERMIC || w.CurrentTech == Weapon.Tech.SUPERCONDUCTIVE ||
-                w.CurrentTech == Weapon.Tech.MASER) {
+        } else if (w.getCurrentTech() == Weapon.Tech.POLYTHERMIC || w.getCurrentTech() == Weapon.Tech.SUPERCONDUCTIVE ||
+                w.getCurrentTech() == Weapon.Tech.MASER) {
             bonus += 1;
         }
         return bonus;
