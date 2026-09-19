@@ -9,8 +9,11 @@ public class Slot implements Serializable {
     public final String name;
     // ---- Classifications ----
     private boolean active;   // true = ACTIVE, false = PASSIVE
+    // active slot means it can be used in combat actively, passive means it does passive effects or just contains items
     private boolean dynamic;  // true = DYNAMIC, false = STATIC
+    // dynamic means items can be put into it, static means it allways remains the same
     private boolean intact;   // true = INTACT, false = DAMAGED
+    // Intact means its not destroyed, damaged means its destroyed and thus cant be used
 
     public String getName() {
         return name;

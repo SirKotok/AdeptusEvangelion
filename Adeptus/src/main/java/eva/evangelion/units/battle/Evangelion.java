@@ -33,7 +33,7 @@ public class Evangelion extends Unit{
         int i = 0;
         for (Slot slot : Slots) {
             i++;
-            Weapon test = new Weapon("Weapon"+i, "Knife", Weapon.Hand.ONE_HANDED);
+            Weapon test = Weapon.createBasicRangedWeapon("weapon #"+i, "Knife", Weapon.Tech.NONE, new ArrayList<>(), 4, Weapon.Hand.ONE_HANDED);
             test.WeaponProperties.add(Weapon.WeaponProperty.SMALL);
             slot.setItem(test);
         }

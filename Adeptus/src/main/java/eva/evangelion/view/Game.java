@@ -3,6 +3,8 @@ package eva.evangelion.view;
 import eva.evangelion.gameboard.Battlefield;
 import eva.evangelion.gameboard.GameBoard;
 import eva.evangelion.gameboard.Sector;
+import eva.evangelion.items.Weapon.AttackProfile;
+import eva.evangelion.items.Weapon.Weapon;
 import eva.evangelion.units.battle.*;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
@@ -96,16 +98,23 @@ public class Game {
     private Pane boardContainer;
     private final BooleanProperty dmMode = new SimpleBooleanProperty(false);
     private VBox namePanel;
-    private VBox turnChoicePanel;   // NEW: panel for "Choose Next Turn" buttons
+    private VBox turnChoicePanel;
 
     // ---- Player & Active Player ----
-    private String currentPlayer;
-    private String activePlayer;               // local, not stored in GameState
+    private String currentPlayer;              // Current assigned name to this client, local, not stored in GameState
+    private String activePlayer;               // Player who's turn it currently is local, not stored in GameState
     private int currentActionNumber = 0;
 
     // ---- Action processing speed ----
     private double actionSpeed = 1.0;           // default 1x speed
     private boolean fastActions = false;        // if true, force instant processing
+    // ---- Attack selection state ----
+    private AttackProfile activeAttackProfile = null;   // currently visualized profile
+    private Weapon selectedAttackWeapon = null;  // null = neutral / unarmed
+    private Slot          selectedAttackWeaponSlot = null;
+    private boolean       attackModeActive = false;
+    private FieldUnit     attackUnit = null;
+    private ScrollableContainer attackWeaponChooserContainer;
 
     // ---- UI top bar ----
     private HBox topBar;
@@ -124,6 +133,12 @@ public class Game {
     private final ObservableList<FieldItem> FieldItemList = FXCollections.observableArrayList();
     private final Map<FieldItem, Node> fieldItemNodes = new HashMap<>();
     private FieldItem draggedFromField = null;   // non-null when dragging from the mini-battlefield
+
+    // ---- Movement visualization ----
+    private MoveAction.MOVEMENTTYPE activeMoveMode = null;   // null = not in move mode
+    private FieldUnit movementUnit = null;
+
+    private final Map<String, Color> visualisationLayer = new LinkedHashMap<>();
 
     // ---- Gameplay ----
     private Queue queue;
@@ -357,6 +372,7 @@ public class Game {
 
     // ---- processAction: handles both MoveAction and DMChoosePlayerAction ----
     private void processAction(Action action) {
+        processActionCost(action);
         if (action instanceof MoveAction) {
             processMoveAction((MoveAction) action);
         } else if (action instanceof DMChoosePlayerAction) {
@@ -392,6 +408,7 @@ public class Game {
                     +queue.getQueue().indexOf(next));
             setActivePlayer(next.getUnitID());
         }
+        refreshStatsContainers();
     }
     private void setBackgroundForInventory(ScrollableContainer mainContainer) {
         LogMessage("Adding evangelion picture as background");
@@ -423,31 +440,37 @@ public class Game {
         int deltaY = movement.getDeltaY();
         int newX = oldX + deltaX;
         int newY = oldY + deltaY;
-
         if (newX < 0 || newX >= battlefield.sizeX || newY < 0 || newY >= battlefield.sizeY) {
             LogMessage("MoveAction failed: Target (" + newX + "," + newY + ") out of bounds.");
             return;
         }
-
         FieldUnit occupying = getUnitAt(newX, newY);
         if (occupying != null && occupying != actor) {
             LogMessage("MoveAction failed: Cell occupied by " + occupying.getName());
             return;
         }
-
         actor.setX(newX);
         actor.setY(newY);
-
         double visualDuration = fastActions ? 0 : movement.getTime() / actionSpeed;
         processMoveVisuals(actor, oldX, oldY, newX, newY, visualDuration);
-
         LogMessage("Moved " + actor.getName() + " from (" + oldX + "," + oldY + ") to (" + newX + "," + newY + ")");
-
         activateQueue(movement);
         setActorToNext(movement);
-
-
     }
+
+    public void processActionCost(Action action) {
+        FieldUnit actor = getUnitFromName(action.getActor());
+        if (actor != null && actor.isExists()) {
+        actor.useATP(action.ATPCost);
+        if (actor.getATP() < 0) LogMessage("ERROR = ATP LESS THEN 0 AT "+action.getActionNumber());
+        actor.useStamina(action.staminaCost);
+        if (actor.getStamina() < 0) LogMessage("ERROR = STAMINA LESS THEN 0 AT "+action.getActionNumber());
+        if (actor.usedTactical() && action.isTactical()) LogMessage("ERROR = TACTICAL ACTION USED WHEN UNIT HAS NO TACTICAL LEFT AT "+action.getActionNumber());
+        actor.useTactical(action.isTactical());
+    } else LogMessage("Action has no actor at "+action.getActionNumber());
+    }
+
+
     private void processSwitchTeamAction(SwitchTeamAction action) {
         DMQueueInsertion(action, "SWITCH_TEAM");
 
@@ -899,6 +922,15 @@ public class Game {
         Unit unit = action.getUnit();
         FieldUnit newUnit = createFieldUnit(playerName, unit, x, y, action.getTeam());
 
+        //TODO REMOVE:
+        Weapon w = Weapon.createBasicRangedWeapon("weapon", "SMG", Weapon.Tech.MASER, new ArrayList<>(), 5, Weapon.Hand.ONE_HANDED);
+        w.setDisplayIcon("weapon_4.png");
+        w.setMinRange(5);
+        w.setMaxRange(10);
+        w.WeaponProperties.add(Weapon.WeaponProperty.SMALL);
+        newUnit.getSlots().get(3).setItem(w);
+
+
         LogMessage("Created Evangelion for " + playerName + " at (" + x + "," + y + ")");
 
         List<QueuePosition> positions = queue.getQueue();
@@ -1022,39 +1054,186 @@ public class Game {
         });
         grid.setOnContextMenuRequested(event -> event.consume());
     }
+    private AttackProfile pendingAttackProfile = null;
+    private Weapon        pendingAttackWeapon  = null;
+    private Slot          pendingAttackSlot    = null;
 
+    /**
+     * Top-level click dispatcher. Decides which interaction mode is active and
+     * forwards to the matching handler. Kept deliberately thin so the individual
+     * modes can be reasoned about in isolation.
+     */
     private void handleSectorClick(int x, int y) {
+
+        // 1. Attack visualization mode wins
+        if (attackModeActive && activeAttackProfile != null && attackUnit != null) {
+            handleAttackSectorClick(x, y);
+            return;
+        }
+
+        // 2. Movement visualization mode
+        if (activeMoveMode != null && movementUnit != null) {
+            handleMovementSectorClick(x, y);
+            return;
+        }
+
+        // 3. Default: unit selection / basic move
+        handleDefaultSectorClick(x, y);
+    }
+
+// ------------------------------------------------------------------
+//   ATTACK MODE
+// ------------------------------------------------------------------
+
+    /**
+     * Handles a click while an attack profile is being visualized.
+     *
+     * Unlike the movement handler, this permits targeting <em>empty</em> sectors —
+     * i.e. the attack can be aimed at a spot on the board with no unit on it.
+     * The only hard requirement is that the sector is inside the profile's
+     * MaxRange. Sectors below MinRange still produce an attack, but log a
+     * "too close" warning so the player knows a penalty will apply.
+     */
+    private void handleAttackSectorClick(int x, int y) {
+
+        // Click outside the highlighted zone: no-op while in attack mode.
+        if (!isInVisualisationLayer(x, y)) return;
+
+        FieldUnit target = getUnitAt(x, y);
+        if (target == attackUnit) {
+            LocalMessage("You cannot target yourself.");
+            return;
+        }
+
+        int dx = x - attackUnit.getX();
+        int dy = y - attackUnit.getY();
+        int dist = Math.max(Math.abs(dx), Math.abs(dy));   // Chebyshev
+
+        int maxRange = activeAttackProfile.MaxRange;
+        if (dist > maxRange) {
+            LocalMessage("Sector out of range (" + dist + " > max " + maxRange + ").");
+            return;
+        }
+        if (isAttackBelowMinRange(activeAttackProfile, dist)) {
+            LocalMessage("Warning: sector is inside min range (" + dist
+                    + " < " + activeAttackProfile.MinRange
+                    + "). Attack will suffer the too-close penalty.");
+        }
+
+        // Preview arrow on the main board
+        clearPreviewArrows();
+        double sx = attackUnit.getX() * 20 + 10;
+        double sy = attackUnit.getY() * 20 + 10;
+        double ex = x * 20 + 10;
+        double ey = y * 20 + 10;
+        Arrow preview = new Arrow(boardContainer, Color.RED, sx, sy, ex, ey,
+                Arrow.ArrowType.PREVIEW);
+        arrows.add(preview);
+
+        // Build the pending AttackAction (works for empty or occupied sectors)
+        AttackAction atk = new AttackAction(currentActionNumber, attackUnit.getName());
+        atk.addHit(x, y);
+        atk.weaponName     = (selectedAttackWeapon != null)     ? selectedAttackWeapon.getName() : null;
+        atk.weaponSlotName = (selectedAttackWeaponSlot != null) ? selectedAttackWeaponSlot.getName() : null;
+        atk.profileName    = activeAttackProfile.name;
+        atk.ammoCost       = activeAttackProfile.AmmoCost;
+        atk.ATPCost        = activeAttackProfile.ATP;
+        atk.staminaCost    = activeAttackProfile.Stamina;
+
+        // Stash for the confirm popup
+        pendingAttackProfile = activeAttackProfile;
+        pendingAttackWeapon  = selectedAttackWeapon;
+        pendingAttackSlot    = selectedAttackWeaponSlot;
+
+        confirmAction = atk;
+
+        String desc = attackUnit.getName() + " → " + CordsToText(x, y);
+        if (target != null) desc += " (" + target.getName() + ")";
+        createConfirmButton(atk, Color.DARKRED, desc);
+
+        LocalMessage(target != null
+                ? "Attack pending on " + target.getName() + ". Click Confirm to finalise."
+                : "Attack pending on empty sector " + CordsToText(x, y) + ". Click Confirm to finalise.");
+    }
+
+// ------------------------------------------------------------------
+//   MOVEMENT MODE
+// ------------------------------------------------------------------
+
+    /**
+     * Handles a click while a movement subtype is being visualized.
+     * Clicking outside the highlighted zone is a no-op.
+     */
+    private void handleMovementSectorClick(int x, int y) {
+        if (!isInVisualisationLayer(x, y)) return;   // ignore non-highlighted sectors
+
+        int dx = x - movementUnit.getX();
+        int dy = y - movementUnit.getY();
+
+        clearPreviewArrows();
+
+        // Preview arrow on the main board
+        double sx = movementUnit.getX() * 20 + 10;
+        double sy = movementUnit.getY() * 20 + 10;
+        double ex = x * 20 + 10;
+        double ey = y * 20 + 10;
+        Arrow preview = new Arrow(boardContainer, Color.ORANGE, sx, sy, ex, ey,
+                Arrow.ArrowType.PREVIEW);
+        arrows.add(preview);
+
+        MoveAction mv = new MoveAction(currentActionNumber, movementUnit.getName(), dx, dy);
+        confirmAction = mv;
+        createConfirmButton(confirmAction, Color.DARKORANGE,
+                movementUnit.getName() + " → " + CordsToText(x, y));
+        LocalMessage("Move pending. Click Confirm to choose movement type.");
+    }
+
+// ------------------------------------------------------------------
+//   DEFAULT MODE (no visualization active)
+// ------------------------------------------------------------------
+
+    /**
+     * Handles a click when neither attack nor movement visualization is active.
+     * Clicking a unit selects it and shows its stats; clicking an empty sector
+     * with a selected unit sets up a basic MoveAction.
+     */
+    private void handleDefaultSectorClick(int x, int y) {
+
         FieldUnit unitAtLocation = getUnitAt(x, y);
         if (unitAtLocation != null) {
             selectedUnit = unitAtLocation;
             LocalMessage("Selected unit: " + selectedUnit.getName());
+            showStatsForUnit(selectedUnit);                 // secondary container
             return;
         }
-        if (selectedUnit != null) {
-            // Check if it's this player's turn
-            QueuePosition current = queue.currentPosition();
-            if (current == null) {
-                LocalMessage("No current turn in queue.");
-                return;
-            }
-            String currentUnitID = current.getUnitID();
-            if (!currentPlayer.equalsIgnoreCase("DM") && !currentUnitID.equals(currentPlayer)) {
-                LocalMessage("It's not your turn. Current turn: " + currentUnitID);
-                return;
-            }
-            if (!currentPlayer.equalsIgnoreCase("DM") && !selectedUnit.getName().equals(currentPlayer)) {
-                LocalMessage("You can only move units that belong to you.");
-                return;
-            }
 
-            confirmAction = new MoveAction(currentActionNumber, selectedUnit.getName(),
-                    x - selectedUnit.getX(), y - selectedUnit.getY());
+        clearSecondaryStats();
 
-            createConfirmButton(confirmAction, Color.DARKORANGE,"Move to ("+x+","+y+")");
-            LocalMessage("Move pending. Click Confirm to send.");
-        } else {
+        if (selectedUnit == null) {
             LocalMessage("No unit selected. Click on a unit to select it.");
+            return;
         }
+
+        QueuePosition current = queue.currentPosition();
+        if (current == null) {
+            LocalMessage("No current turn in queue.");
+            return;
+        }
+        String currentUnitID = current.getUnitID();
+        if (!currentPlayer.equalsIgnoreCase("DM") && !currentUnitID.equals(currentPlayer)) {
+            LocalMessage("It's not your turn. Current turn: " + currentUnitID);
+            return;
+        }
+        if (!currentPlayer.equalsIgnoreCase("DM") && !selectedUnit.getName().equals(currentPlayer)) {
+            LocalMessage("You can only move units that belong to you.");
+            return;
+        }
+
+        confirmAction = new MoveAction(currentActionNumber, selectedUnit.getName(),
+                x - selectedUnit.getX(), y - selectedUnit.getY());
+
+        createConfirmButton(confirmAction, Color.DARKORANGE, "Move to (" + x + "," + y + ")");
+        LocalMessage("Move pending. Click Confirm to send.");
     }
 
 
@@ -1081,6 +1260,24 @@ public class Game {
     }
 
     private void showConfirmPopup(Action action, Color color, String description) {
+
+        if (action instanceof MoveAction) {
+            MoveAction mv = (MoveAction) action;
+            FieldUnit u = getUnitFromName(mv.getActor());
+            if (u != null) {
+                int tx = u.getX() + mv.getDeltaX();
+                int ty = u.getY() + mv.getDeltaY();
+                showMoveConfirmPopup(mv, tx, ty);
+                return;
+            }
+        }
+        // ---- NEW: Attack branch ----
+        if (action instanceof AttackAction) {
+            showAttackConfirmPopup((AttackAction) action,
+                    pendingAttackProfile, pendingAttackWeapon, pendingAttackSlot);
+            return;
+        }
+
         Stage popupStage = new Stage();
         popupStage.initModality(Modality.APPLICATION_MODAL);
         popupStage.setTitle("Confirm Action");
@@ -1144,6 +1341,863 @@ public class Game {
 
         popupStage.show();
     }
+
+
+    private void showAttackConfirmPopup(AttackAction action, AttackProfile profile,
+                                        Weapon weapon, Slot slot) {
+        if (profile == null) { LocalMessage("No attack profile selected."); return; }
+        FieldUnit attacker = getUnitFromName(action.getActor());
+        if (attacker == null || !attacker.isExists()) return;
+
+        Stage popupStage = new Stage();
+        popupStage.initModality(Modality.APPLICATION_MODAL);
+        popupStage.setTitle("Confirm Attack");
+        popupStage.initStyle(StageStyle.TRANSPARENT);
+
+        VBox content = new VBox(12);
+        content.setPadding(new Insets(20));
+        content.setAlignment(Pos.CENTER);
+        content.setStyle(
+                "-fx-background-color: white;" +
+                        "-fx-border-color: " + toHex(Color.DARKRED) + ";" +
+                        "-fx-border-width: 4;" +
+                        "-fx-border-radius: 8;" +
+                        "-fx-background-radius: 8;" +
+                        "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.4), 12, 0, 0, 4);");
+
+        Scene scene = new Scene(content, 560, 640);
+        scene.setFill(Color.TRANSPARENT);
+
+        Label titleLabel = new Label("Confirm Attack");
+        titleLabel.setStyle("-fx-font-size: 16px; -fx-font-weight: bold;");
+
+        StringBuilder hitsText = new StringBuilder(attacker.getName())
+                .append(": ").append(CordsToText(attacker.getX(), attacker.getY()))
+                .append("  →  ");
+        for (int i = 0; i < action.hitPositions.size(); i++) {
+            AttackAction.Hit h = action.hitPositions.get(i);
+            if (i > 0) hitsText.append(", ");
+            hitsText.append(CordsToText(h.x, h.y));
+            FieldUnit hU = getUnitAt(h.x, h.y);
+            if (hU != null) hitsText.append(" (").append(hU.getName()).append(")");
+        }
+        Label posLabel = new Label(hitsText.toString());
+        posLabel.setStyle("-fx-font-size: 13px; -fx-text-fill: #333;");
+        posLabel.setWrapText(true);
+        posLabel.setMaxWidth(500);
+
+        GridPane statusGrid = new GridPane();
+        statusGrid.setHgap(15);
+        statusGrid.setVgap(4);
+        statusGrid.setStyle("-fx-background-color: #f4f4f4; -fx-padding: 8;" +
+                "-fx-border-color: #cccccc; -fx-border-width: 1;");
+        statusGrid.add(new Label("Stamina:"), 0, 0);
+        statusGrid.add(new Label(attacker.getStamina() + " / " + attacker.getMaxStamina()), 1, 0);
+        statusGrid.add(new Label("ATP:"), 0, 1);
+        statusGrid.add(new Label(attacker.getATP() + " / " + attacker.getMaxATP()), 1, 1);
+        statusGrid.add(new Label("Profile Stamina cost:"), 0, 2);
+        statusGrid.add(new Label(String.valueOf(profile.Stamina)), 1, 2);
+        if (profile.ATP > 0) {
+            statusGrid.add(new Label("Profile ATP cost:"), 0, 3);
+            statusGrid.add(new Label(String.valueOf(profile.ATP)), 1, 3);
+        }
+
+        VBox weaponBox = new VBox(4);
+        weaponBox.setStyle("-fx-background-color: #fff2f2; -fx-padding: 8;" +
+                "-fx-border-color: #cc8888; -fx-border-width: 1;");
+        if (weapon != null) {
+            Label wName = new Label("Weapon: " + weapon.getName()
+                    + (slot != null ? "  (" + slot.getName() + ")" : ""));
+            wName.setStyle("-fx-font-weight: bold;");
+            weaponBox.getChildren().add(wName);
+            if (weapon.isRanged() || profile.AmmoCost > 0) {
+                int remaining = weapon.getAmmo() - profile.AmmoCost;
+                Label ammo = new Label("Ammo:  " + weapon.getAmmo() + " / " + weapon.getMaxAmmo()
+                        + "      Cost: " + profile.AmmoCost);
+                ammo.setStyle("-fx-font-weight: bold; -fx-text-fill: "
+                        + (remaining < 0 ? "#b00020" : "#2e7d32") + ";");
+                weaponBox.getChildren().add(ammo);
+            }
+        } else {
+            Label wName = new Label("Weapon: Neutral (Unarmed)");
+            wName.setStyle("-fx-font-weight: bold;");
+            weaponBox.getChildren().add(wName);
+        }
+
+        TextArea descArea = new TextArea();
+        descArea.setEditable(false);
+        descArea.setWrapText(true);
+        descArea.setPrefRowCount(8);
+        descArea.setPrefWidth(500);
+        descArea.setText(describeProfileFull(profile));
+
+        Label rollHeader = new Label("Attack Roll (1–100):");
+        rollHeader.setStyle("-fx-font-weight: bold;");
+        Label rollValue = new Label("—");
+        rollValue.setStyle("-fx-font-size: 24px; -fx-font-weight: bold; -fx-text-fill: #8b0000;");
+
+        BetterButton rollBtn = new BetterButton("Roll d100");
+        rollBtn.setPrimaryStyle();
+        final int[] rolled = {0};
+
+        BetterButton proceedBtn = new BetterButton("Proceed");
+        proceedBtn.setSuccessStyle();
+        proceedBtn.setDisable(true);
+
+        rollBtn.setOnAction(e -> {
+            int r = 1 + (int) (Math.random() * 100);
+            rolled[0] = r;
+            rollValue.setText(String.valueOf(r));
+            proceedBtn.setDisable(false);
+        });
+
+        HBox rollRow = new HBox(10, rollBtn, rollValue);
+        rollRow.setAlignment(Pos.CENTER);
+
+        proceedBtn.setOnAction(e -> {
+            action.rolledValue = rolled[0];
+            SendAction(action);
+            clearAttackVisualization();
+            pendingAttackProfile = null;
+            pendingAttackWeapon  = null;
+            pendingAttackSlot    = null;
+            confirmAction = null;
+            confirmContainer.getChildren().clear();
+            popupStage.close();
+        });
+
+        BetterButton cancelBtn = new BetterButton("Cancel");
+        cancelBtn.setDangerStyle();
+        cancelBtn.setOnAction(e -> popupStage.close());
+
+        HBox btnBox = new HBox(10, cancelBtn, proceedBtn);
+        btnBox.setAlignment(Pos.CENTER);
+
+        content.getChildren().addAll(titleLabel, posLabel, statusGrid, weaponBox,
+                descArea, rollHeader, rollRow, btnBox);
+
+        final double[] dragOffset = new double[2];
+        content.setOnMousePressed(e -> {
+            dragOffset[0] = e.getSceneX();
+            dragOffset[1] = e.getSceneY();
+        });
+        content.setOnMouseDragged(e -> {
+            popupStage.setX(e.getScreenX() - dragOffset[0]);
+            popupStage.setY(e.getScreenY() - dragOffset[1]);
+        });
+
+        popupStage.setScene(scene);
+        popupStage.show();
+    }
+    // ============================================================
+//   ATTACK CHOOSER
+// ============================================================
+
+    private void validateWeaponSelection() {
+        if (selectedAttackWeapon == null) { selectedAttackWeaponSlot = null; return; }
+        FieldUnit unit = findUnitSilent(currentPlayer);
+        if (unit == null || unit.getSlots() == null) {
+            selectedAttackWeapon = null; selectedAttackWeaponSlot = null; return;
+        }
+        if (selectedAttackWeaponSlot != null
+                && selectedAttackWeaponSlot.isActive()
+                && selectedAttackWeaponSlot.getItem() == selectedAttackWeapon) return;
+        for (Slot s : unit.getSlots()) {
+            if (s.isActive() && s.isIntact() && s.getItem() == selectedAttackWeapon) {
+                selectedAttackWeaponSlot = s; return;
+            }
+        }
+        selectedAttackWeapon = null; selectedAttackWeaponSlot = null;
+    }
+    /**
+     * True when the weapon has a technology that can be toggled on/off via
+     * {@link Weapon#SetActivateTech(boolean)}. Currently only N2 Shell and Maser
+     * consume the activation flag inside {@link Weapon#getWeaponProfiles()}.
+     */
+    private boolean hasActivatableTech(Weapon weapon) {
+        if (weapon == null) return false;
+        return weapon.CurrentTech == Weapon.Tech.N2SHELL
+                || weapon.CurrentTech == Weapon.Tech.MASER;
+    }
+
+    private void rebuildWeaponChooser() {
+        if (attackWeaponChooserContainer == null) return;
+        attackWeaponChooserContainer.clearNodes();
+        validateWeaponSelection();
+
+        Label title = new Label("Choose Weapon");
+        title.setStyle("-fx-font-weight: bold; -fx-font-size: 14px; -fx-text-fill: #8b0000;");
+        attackWeaponChooserContainer.addNode(title);
+
+        FieldUnit unit = findUnitSilent(currentPlayer);
+        if (unit == null || !unit.isExists()) {
+            Label empty = new Label("No unit selected.");
+            empty.setStyle("-fx-text-fill: #666; -fx-font-style: italic;");
+            attackWeaponChooserContainer.addNode(empty);
+            return;
+        }
+
+        BetterButton neutralBtn = new BetterButton("Neutral (Unarmed)");
+        neutralBtn.setPrimaryStyle();
+        neutralBtn.setMaxWidth(Double.MAX_VALUE);
+        if (selectedAttackWeapon == null) {
+            neutralBtn.setStyle("-fx-border-color: #8b0000; -fx-border-width: 3; -fx-border-radius: 4;");
+        }
+        neutralBtn.setOnAction(e -> {
+            selectedAttackWeapon = null;
+            selectedAttackWeaponSlot = null;
+            clearAttackVisualization();
+            rebuildWeaponChooser();
+            rebuildAttackMenu();
+        });
+        attackWeaponChooserContainer.addNode(neutralBtn);
+
+        if (unit.getSlots() != null) {
+            for (Slot slot : unit.getSlots()) {
+                if (!slot.isActive() || !slot.isIntact()) continue;
+                Item it = slot.getItem();
+                if (!(it instanceof Weapon weapon)) continue;
+
+                String label = slot.getName() + ": " + weapon.getName();
+                if (weapon.isRanged())
+                    label += "   [" + weapon.getAmmo() + "/" + weapon.getMaxAmmo() + "]";
+
+                BetterButton slotBtn = new BetterButton(label);
+                slotBtn.setPrimaryStyle();
+                slotBtn.setMaxWidth(Double.MAX_VALUE);
+                if (selectedAttackWeaponSlot == slot) {
+                    slotBtn.setStyle("-fx-border-color: #8b0000; -fx-border-width: 3; -fx-border-radius: 4;");
+                }
+                slotBtn.setOnAction(e -> {
+                    selectedAttackWeapon = weapon;
+                    selectedAttackWeaponSlot = slot;
+                    clearAttackVisualization();
+                    rebuildWeaponChooser();
+                    rebuildAttackMenu();
+                });
+                attackWeaponChooserContainer.addNode(slotBtn);
+            }
+            // ---- Tech-activation checkbox (only for N2 Shell / Maser) ----
+            if (selectedAttackWeapon != null && hasActivatableTech(selectedAttackWeapon)) {
+                Weapon w = selectedAttackWeapon;
+                String techName = (w.CurrentTech == Weapon.Tech.N2SHELL)
+                        ? "N2 Shell" : "Maser";
+
+                CheckBox activateTechCb = new CheckBox("Activate " + techName);
+                activateTechCb.setSelected(w.isActiveTech());
+                activateTechCb.setStyle(
+                        "-fx-font-weight: bold;" +
+                                "-fx-text-fill: #8b0000;" +
+                                "-fx-padding: 8 0 0 4;");
+                activateTechCb.setTooltip(new Tooltip(
+                        w.CurrentTech == Weapon.Tech.N2SHELL
+                                ? "N2 Shell: spend 1 extra Ammo to increase the Area rating by 1."
+                                : "Maser: spend 1 extra Ammo to gain Line and +1 additional Penetration."));
+                activateTechCb.setOnAction(e -> {
+                    w.SetActivateTech(activateTechCb.isSelected());
+
+                    // Profiles are rebuilt on demand by getWeaponProfiles(),
+                    // so clear the stale visualization and refresh the menu.
+                    clearAttackVisualization();
+                    rebuildAttackMenu();
+
+                    LocalMessage("Tech " + techName + " "
+                            + (activateTechCb.isSelected() ? "ACTIVATED" : "deactivated")
+                            + " for " + w.getName() + ".");
+                });
+                attackWeaponChooserContainer.addNode(activateTechCb);
+            }
+
+        }
+    }
+
+    private void rebuildAttackMenu() {
+        if (attackScrollContainer == null) return;
+        attackScrollContainer.clearNodes();
+
+        Label header = new Label("Attack Actions");
+        header.setStyle("-fx-font-weight: bold; -fx-font-size: 14px; " +
+                "-fx-text-fill: #8b0000; -fx-padding: 0 0 4 0;");
+        attackScrollContainer.addNode(header);
+
+        FieldUnit unit = findUnitSilent(currentPlayer);
+        if (unit == null || !unit.isExists()) {
+            Label empty = new Label("No unit to attack with.");
+            empty.setStyle("-fx-text-fill: #666; -fx-font-style: italic;");
+            attackScrollContainer.addNode(empty);
+            return;
+        }
+
+        String weaponName = (selectedAttackWeapon != null)
+                ? selectedAttackWeapon.getName() : "Neutral (Unarmed)";
+        Label context = new Label("Using: " + weaponName);
+        context.setStyle("-fx-font-style: italic; -fx-text-fill: #555; -fx-padding: 0 0 6 0;");
+        attackScrollContainer.addNode(context);
+
+        List<AttackProfile> profiles = new ArrayList<>();
+        if (selectedAttackWeapon != null) {
+            List<AttackProfile> w = selectedAttackWeapon.getWeaponProfiles(selectedAttackWeapon.Technology.get(0));
+            if (w != null) profiles.addAll(w);
+        } else {
+            List<AttackProfile> u = unit.getUnitAttackProfiles();
+            if (u != null) profiles.addAll(u);
+        }
+
+        if (profiles.isEmpty()) {
+            Label empty = new Label("No attack profiles available.");
+            empty.setStyle("-fx-text-fill: #666; -fx-font-style: italic;");
+            attackScrollContainer.addNode(empty);
+            return;
+        }
+
+        for (AttackProfile profile : profiles) {
+            VBox profileBox = new VBox(2);
+            String style = (activeAttackProfile == profile)
+                    ? "-fx-border-color: #8b0000; -fx-border-width: 2; -fx-padding: 4;"
+                    : "-fx-border-color: #cccccc; -fx-border-width: 1; -fx-padding: 4;";
+            profileBox.setStyle(style);
+
+            BetterButton btn = new BetterButton(profile.name);
+            btn.setPrimaryStyle();
+            btn.setMaxWidth(Double.MAX_VALUE);
+            btn.setOnAction(e -> startAttackVisualization(profile));
+
+            Label descLabel = new Label(describeProfileShort(profile));
+            descLabel.setWrapText(true);
+            descLabel.setStyle("-fx-font-size: 10px; -fx-text-fill: #333;");
+
+            profileBox.getChildren().addAll(btn, descLabel);
+            attackScrollContainer.addNode(profileBox);
+        }
+    }
+
+    private String describeProfileShort(AttackProfile p) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(p.Dice).append("d").append(p.Dicepower);
+        if (p.Power != 0) sb.append(p.Power > 0 ? "+" : "").append(p.Power);
+        sb.append("  |  Pen ").append(p.Penetration);
+        if (p.Stamina > 0)  sb.append("  |  Stam ").append(p.Stamina);
+        if (p.ATP > 0)      sb.append("  |  ATP ").append(p.ATP);
+        if (p.AmmoCost > 0) sb.append("  |  Ammo ").append(p.AmmoCost);
+        if (p.AreaType == -2)     sb.append("  |  Line");
+        else if (p.AreaType >= 0) sb.append("  |  Area ").append(p.AreaType);
+        if (p.Ranged) {
+            sb.append("  |  Rng ").append(p.MinRange).append("-").append(p.MaxRange);
+        } else if (p.MaxRange > 1) {
+            sb.append("  |  Reach ").append(p.MaxRange);
+        }
+        return sb.toString();
+    }
+
+    private String describeProfileFull(AttackProfile p) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Profile: ").append(p.name).append("\n");
+        sb.append("Type: ").append(p.ProfileType).append("\n");
+        sb.append("Damage: ").append(p.Dice).append("d").append(p.Dicepower);
+        if (p.Power != 0) sb.append(" + ").append(p.Power);
+        sb.append("\n");
+        sb.append("Penetration: ").append(p.Penetration).append("\n");
+        sb.append("Stamina cost: ").append(p.Stamina).append("\n");
+        sb.append("ATP cost: ").append(p.ATP).append("\n");
+        if (p.AmmoCost > 0) sb.append("Ammo cost: ").append(p.AmmoCost).append("\n");
+        if (p.AreaType == -2) sb.append("Area: Line\n");
+        else if (p.AreaType >= 0) sb.append("Area: ").append(p.AreaType).append("\n");
+        sb.append("Range: ").append(p.MinRange).append(" - ").append(p.MaxRange).append("\n");
+        if (p.AttackProperties != null && !p.AttackProperties.isEmpty()) {
+            sb.append("Properties: ");
+            for (int i = 0; i < p.AttackProperties.size(); i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(p.AttackProperties.get(i));
+            }
+            sb.append("\n");
+        }
+        return sb.toString();
+    }
+
+    private void startAttackVisualization(AttackProfile profile) {
+        FieldUnit unit = findUnitSilent(currentPlayer);
+        if (unit == null || !unit.isExists()) { LocalMessage("No unit to attack with."); return; }
+
+        QueuePosition current = queue.currentPosition();
+        if (current == null) { LocalMessage("No current turn in queue."); return; }
+        if (!currentPlayer.equalsIgnoreCase("DM") && !current.getUnitID().equals(currentPlayer)) {
+            LocalMessage("It's not your turn."); return;
+        }
+
+        if (attackModeActive && activeAttackProfile == profile && attackUnit == unit) {
+            clearAttackVisualization();
+            rebuildAttackMenu();
+            return;
+        }
+
+        if (unit.getStamina() < profile.Stamina) { LocalMessage("Not enough Stamina."); return; }
+        if (unit.getATP()     < profile.ATP)     { LocalMessage("Not enough ATP."); return; }
+        if (selectedAttackWeapon != null && profile.AmmoCost > 0
+                && selectedAttackWeapon.getAmmo() < profile.AmmoCost) {
+            LocalMessage("Not enough ammo (need " + profile.AmmoCost
+                    + ", have " + selectedAttackWeapon.getAmmo() + ")."); return;
+        }
+
+        clearMovementVisualization();
+        clearVisualisationLayer();
+        clearPreviewArrows();
+
+        attackModeActive    = true;
+        activeAttackProfile = profile;
+        attackUnit          = unit;
+
+        // Range is entirely determined by the profile.
+        int minRange = profile.MinRange;
+        int maxRange = profile.MaxRange;
+
+        // Attackable zone – red
+        Color attackTint   = Color.rgb(255, 40, 40);
+        // Too-close zone – pink, visually distinct from the attack zone
+        Color tooCloseTint = Color.rgb(255, 159, 159);
+
+        for (int dx = -maxRange; dx <= maxRange; dx++) {
+            for (int dy = -maxRange; dy <= maxRange; dy++) {
+                if (dx == 0 && dy == 0) continue;
+                int dist = Math.max(Math.abs(dx), Math.abs(dy));   // Chebyshev
+                if (dist > maxRange) continue;
+                int tx = unit.getX() + dx;
+                int ty = unit.getY() + dy;
+                if (tx < 0 || tx >= battlefield.sizeX || ty < 0 || ty >= battlefield.sizeY) continue;
+
+                Color tint = isAttackBelowMinRange(profile, dist) ? tooCloseTint : attackTint;
+                addToVisualisationLayer(tx, ty, tint);
+            }
+        }
+
+        applyVisualisation();
+        rebuildAttackMenu();
+
+        LogMessage("Visualizing attack profile '" + profile.name + "' for "
+                + unit.getName() + " (range " + minRange + "-" + maxRange + ").");
+    }
+
+    /**
+     * Returns true when an attack made at {@code distance} (Chebyshev) would fall
+     * inside the profile's minimum range, incurring the "too close" debuff.
+     * Range itself is always taken from the profile — the weapon no longer
+     * contributes to it at this stage (that happens in Weapon.getWeaponProfiles()).
+     */
+    private boolean isAttackBelowMinRange(AttackProfile profile, int distance) {
+        if (profile == null) return false;
+        return distance < profile.MinRange;
+    }
+
+    private void clearAttackVisualization() {
+        attackModeActive = false;
+        activeAttackProfile = null;
+        attackUnit = null;
+        pendingAttackProfile = null;
+        pendingAttackWeapon  = null;
+        pendingAttackSlot    = null;
+        clearPreviewArrows();
+        clearVisualisationLayer();
+    }
+
+
+
+    /**
+     * Highlights every sector the current unit can legally move to for the
+     * given movement subtype. Toggles off if the same mode is already active.
+     *
+     * For Run / Cover, further stamina-tiers of range are tinted progressively
+     * darker so the player can see how much stamina each sector will cost.
+     */
+    private void startMoveVisualization(MoveAction.MOVEMENTTYPE mode) {
+        // Toggle off if pressing the same mode again
+        if (activeMoveMode == mode) {
+            return;
+        }
+
+        FieldUnit unit = getUnitFromName(currentPlayer);
+        if (unit == null || !unit.isExists()) {
+            LocalMessage("No unit to move.");
+            return;
+        }
+
+        // Turn check
+        QueuePosition current = queue.currentPosition();
+        if (current == null) {
+            LocalMessage("No current turn in queue.");
+            return;
+        }
+        if (!currentPlayer.equalsIgnoreCase("DM") && !current.getUnitID().equals(currentPlayer)) {
+            LocalMessage("It's not your turn.");
+            return;
+        }
+
+        // Requirement checks per subtype
+        int stamina = unit.getStamina();
+        int atp     = unit.getATP();
+        int speed   = Math.max(1, unit.getSpeed());
+
+        if ((mode == MoveAction.MOVEMENTTYPE.RUN || mode == MoveAction.MOVEMENTTYPE.COVER)
+                && stamina < 1) {
+            LocalMessage("Not enough Stamina.");
+            return;
+        }
+        if (mode == MoveAction.MOVEMENTTYPE.TACTICAL && unit.usedTactical()) {
+            LocalMessage("Tactical action already used this turn.");
+            return;
+        }
+        if (mode == MoveAction.MOVEMENTTYPE.REPOSITION && atp < 1) {
+            LocalMessage("Not enough ATP for Reposition.");
+            return;
+        }
+
+        // Fresh layer
+        clearVisualisationLayer();
+        activeMoveMode = mode;
+        movementUnit = unit;
+
+        int maxDist = maxDistanceFor(mode, unit);
+        Color baseTint = movementTint(mode);
+
+        for (int dx = -maxDist; dx <= maxDist; dx++) {
+            for (int dy = -maxDist; dy <= maxDist; dy++) {
+                if (dx == 0 && dy == 0) continue;
+
+                int dist = Math.max(Math.abs(dx), Math.abs(dy));   // Chebyshev
+                if (dist > maxDist) continue;
+
+                int tx = unit.getX() + dx;
+                int ty = unit.getY() + dy;
+                if (tx < 0 || tx >= battlefield.sizeX || ty < 0 || ty >= battlefield.sizeY) continue;
+
+                FieldUnit occupying = getUnitAt(tx, ty);
+                if (occupying != null && occupying != unit) continue;
+
+                if (mode == MoveAction.MOVEMENTTYPE.COVER) {
+                    Sector s = gameBoard.getSector(tx, ty);
+                    if (s == null || !gameBoard.isCover(s)) continue;
+                }
+
+                // --- Tier for the tint ---
+                // Run / Cover: tier = how many stamina this distance costs, minus 1
+                // Tactical / Maneuver: single tier
+                // Reposition: single tier
+                int tier;
+                switch (mode) {
+                    case RUN, COVER -> tier = Math.max(0,
+                            (int) Math.ceil((double) dist / speed) - 1);
+                    default         -> tier = 0;
+                }
+
+                Color tint = darkenForTier(baseTint, tier);
+                addToVisualisationLayer(tx, ty, tint);
+            }
+        }
+
+        // Push the layer to the board
+        applyVisualisation();
+
+        LogMessage("Visualizing " + mode + " movement for " + unit.getName()
+                + " (" + visualisationLayer.size() + " sectors, maxDist=" + maxDist + ").");
+    }
+
+    private void clearMovementVisualization() {
+        activeMoveMode = null;
+        movementUnit = null;
+        clearPreviewArrows();     // wipes the orange PREVIEW arrows on the board
+        clearVisualisationLayer(); // resets sectors AND empties the layer
+    }
+    /**
+     * Returns a progressively darker version of {@code base}.
+     * tier 0 = original, tier 1 = ~25% darker, tier 2 = ~44% darker, ...
+     */
+    private static Color darkenForTier(Color base, int tier) {
+        if (tier <= 0) return base;
+        double factor = Math.pow(0.75, tier);          // 1.0, 0.75, 0.5625, ...
+        return new Color(
+                base.getRed()   * factor,
+                base.getGreen() * factor,
+                base.getBlue()  * factor,
+                1.0
+        );
+    }
+
+    /** Range (in sectors, Manhattan) that a single stamina buys. */
+    private static int runTierRange(FieldUnit unit) {
+        return Math.max(1, unit.getSpeed());
+    }
+
+    /**
+     * How much Stamina (0..n) a movement of {@code distance} costs for
+     * the given subtype. Returns 0 if the subtype uses no stamina.
+     */
+    private static int staminaCostFor(MoveAction.MOVEMENTTYPE type, int distance, int speed) {
+        switch (type) {
+            case RUN, COVER -> {
+                int per = Math.max(1, speed);
+                int tiers = (int) Math.ceil((double) distance / per);
+                return Math.max(1, tiers);
+            }
+            case TACTICAL, MANEUVER, REPOSITION -> { return 0; }
+        }
+        return 0;
+    }
+
+    /** ATP cost of the given subtype. */
+    private static int atpCostFor(MoveAction.MOVEMENTTYPE type) {
+        return (type == MoveAction.MOVEMENTTYPE.REPOSITION) ? 1 : 0;
+    }
+
+    /** Max reachable distance for a subtype given unit stats. */
+    private static int maxDistanceFor(MoveAction.MOVEMENTTYPE type, FieldUnit unit) {
+        int speed = Math.max(1, unit.getSpeed());
+        switch (type) {
+            case RUN, COVER    -> { return speed * Math.max(1, unit.getStamina()); }
+            case TACTICAL      -> { return Math.max(2, (int) Math.ceil(speed / 2.0)); }
+            case MANEUVER      -> { return 1; }
+            case REPOSITION    -> { return 3; }
+        }
+        return 0;
+    }
+
+
+// ============================================================
+//   SPECIAL MOVE CONFIRM POPUP
+// ============================================================
+
+    private void showMoveConfirmPopup(MoveAction action, int targetX, int targetY) {
+        FieldUnit unit = getUnitFromName(action.getActor());
+        if (unit == null || !unit.isExists()) return;
+
+        final int startX   = unit.getX();
+        final int startY   = unit.getY();
+        final int distance = Math.max(Math.abs(action.getDeltaX()), Math.abs(action.getDeltaY()));   // Chebyshev
+        final int speed    = Math.max(1, unit.getSpeed());
+        final int atp      = unit.getATP();
+        final int stamina  = unit.getStamina();
+
+        Sector destSector   = gameBoard.getSector(targetX, targetY);
+        boolean destIsCover = destSector != null && gameBoard.isCover(destSector);
+        int tacticalRange   = Math.max(2, (int) Math.ceil(speed / 2.0));
+        int maxRun          = speed * Math.max(1, stamina);
+
+        // Build the list of currently valid subtypes for this destination
+        List<MoveAction.MOVEMENTTYPE> available = new ArrayList<>();
+        if (stamina >= 1 && distance <= maxRun)
+            available.add(MoveAction.MOVEMENTTYPE.RUN);
+        if (!unit.usedTactical() && distance <= tacticalRange)
+            available.add(MoveAction.MOVEMENTTYPE.TACTICAL);
+        if (atp >= 1 && distance <= 3)
+            available.add(MoveAction.MOVEMENTTYPE.REPOSITION);
+        if (distance == 1 && stamina >= 1)
+            available.add(MoveAction.MOVEMENTTYPE.MANEUVER);
+        if (destIsCover && stamina >= 1 && distance <= maxRun)
+            available.add(MoveAction.MOVEMENTTYPE.COVER);
+
+        if (available.isEmpty()) {
+            LocalMessage("No valid movement types for this destination.");
+            return;
+        }
+
+        // ---- Window ----
+        Stage popupStage = new Stage();
+        popupStage.initModality(Modality.APPLICATION_MODAL);
+        popupStage.setTitle("Confirm Movement");
+        popupStage.initStyle(StageStyle.TRANSPARENT);
+
+        VBox content = new VBox(12);
+        content.setPadding(new Insets(20));
+        content.setAlignment(Pos.CENTER);
+        content.setStyle(
+                "-fx-background-color: white;" +
+                        "-fx-border-color: " + toHex(Color.DARKORANGE) + ";" +
+                        "-fx-border-width: 4;" +
+                        "-fx-border-radius: 8;" +
+                        "-fx-background-radius: 8;" +
+                        "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.4), 12, 0, 0, 4);"
+        );
+
+        Scene scene = new Scene(content, 580, 620);
+        scene.setFill(Color.TRANSPARENT);
+
+        Label titleLabel = new Label("Confirm Movement");
+        titleLabel.setStyle("-fx-font-size: 16px; -fx-font-weight: bold;");
+
+        // ---- Position line: start → end + distance ----
+        Label posLabel = new Label(
+                unit.getName() + ": " +
+                        CordsToText(startX, startY) + "  →  " + CordsToText(targetX, targetY) +
+                        "     (distance " + distance + ")");
+        posLabel.setStyle("-fx-font-size: 13px; -fx-text-fill: #333;");
+
+        // ---- Unit status box ----
+        GridPane statusGrid = new GridPane();
+        statusGrid.setHgap(15);
+        statusGrid.setVgap(4);
+        statusGrid.setStyle(
+                "-fx-background-color: #f4f4f4; -fx-padding: 8;" +
+                        "-fx-border-color: #cccccc; -fx-border-width: 1;"
+        );
+
+        statusGrid.add(new Label("Stamina:"),  0, 0);
+        statusGrid.add(new Label(stamina + " / " + unit.getMaxStamina()), 1, 0);
+        statusGrid.add(new Label("ATP:"),      0, 1);
+        statusGrid.add(new Label(atp + " / " + unit.getMaxATP()), 1, 1);
+        statusGrid.add(new Label("Tactical:"), 0, 2);
+        Label tactLabel = new Label(unit.hasTactical() ? "Available" : "Used");
+        tactLabel.setStyle(unit.hasTactical()
+                ? "-fx-text-fill: #2e7d32; -fx-font-weight: bold;"
+                : "-fx-text-fill: #b00020; -fx-font-weight: bold;");
+        statusGrid.add(tactLabel, 1, 2);
+
+        // ---- Subtype selector ----
+        MoveAction.MOVEMENTTYPE defaultType =
+                (activeMoveMode != null && available.contains(activeMoveMode))
+                        ? activeMoveMode
+                        : available.get(0);
+
+        ComboBox<MoveAction.MOVEMENTTYPE> typeCombo = new ComboBox<>();
+        typeCombo.getItems().addAll(available);
+        typeCombo.setValue(defaultType);
+        typeCombo.setPrefWidth(220);
+
+        HBox comboRow = new HBox(10, new Label("Movement Type:"), typeCombo);
+        comboRow.setAlignment(Pos.CENTER);
+
+        // ---- Cost line (recomputes on subtype change) ----
+        Label costLabel = new Label();
+        costLabel.setStyle("-fx-font-size: 13px; -fx-font-weight: bold;");
+
+        Runnable updateCost = () -> {
+            MoveAction.MOVEMENTTYPE t = typeCombo.getValue();
+            int sc = staminaCostFor(t, distance, speed);
+            int ac = atpCostFor(t);
+            costLabel.setText("Cost:  " + sc + " Stamina,  " + ac + " ATP");
+            costLabel.setStyle("-fx-font-size: 13px; -fx-font-weight: bold; "
+                    + "-fx-text-fill: " + ((sc > stamina || ac > atp)
+                    ? "#b00020" : "#2e7d32") + ";");
+        };
+        updateCost.run();
+
+        // ---- Description box ----
+        TextArea descArea = new TextArea();
+        descArea.setEditable(false);
+        descArea.setWrapText(true);
+        descArea.setPrefRowCount(9);
+        descArea.setPrefWidth(520);
+        descArea.setText(getMovementTypeDescription(defaultType));
+
+        typeCombo.valueProperty().addListener((o, oldV, newV) -> {
+            if (newV != null) {
+                descArea.setText(getMovementTypeDescription(newV));
+                updateCost.run();
+            }
+        });
+
+        // ---- Buttons ----
+        BetterButton proceedBtn = new BetterButton("Proceed");
+        proceedBtn.setSuccessStyle();
+        proceedBtn.setOnAction(e -> {
+            MoveAction.MOVEMENTTYPE chosen = typeCombo.getValue();
+            applyMovementTypeToAction(action, chosen);
+            SendAction(action);
+            clearMovementVisualization();
+            confirmAction = null;
+            confirmContainer.getChildren().clear();
+            popupStage.close();
+        });
+
+        BetterButton cancelBtn = new BetterButton("Cancel");
+        cancelBtn.setDangerStyle();
+        cancelBtn.setOnAction(e -> {
+            popupStage.close();
+        });
+
+        HBox btnBox = new HBox(10, cancelBtn, proceedBtn);
+        btnBox.setAlignment(Pos.CENTER);
+
+        content.getChildren().addAll(
+                titleLabel,
+                posLabel,
+                statusGrid,
+                comboRow,
+                costLabel,
+                descArea,
+                btnBox);
+
+        // Draggable borderless window
+        final double[] dragOffset = new double[2];
+        content.setOnMousePressed(e -> {
+            dragOffset[0] = e.getSceneX();
+            dragOffset[1] = e.getSceneY();
+        });
+        content.setOnMouseDragged(e -> {
+            popupStage.setX(e.getScreenX() - dragOffset[0]);
+            popupStage.setY(e.getScreenY() - dragOffset[1]);
+        });
+
+        popupStage.setScene(scene);
+        popupStage.show();
+    }
+
+    private String getMovementTypeDescription(MoveAction.MOVEMENTTYPE type) {
+        switch (type) {
+            case RUN:
+                return "The Eva dashes across the battlefield, achieving a new position.  " +
+                        "Move up to your Speed. \n\n" +
+                        "When you Run at least half your speed (minimum 2 Sectors), you also gain " +
+                        "a +15 bonus to Reflexes until the start of your next Turn or Interval.  \n\n" +
+                        "This bonus does not stack with itself nor with the Defend Action.";
+            case COVER:
+                return "You move up to your Speed, ending adjacent to a nearby sturdy object.  " +
+                        "Until the start of your next Turn or Interval, you gain +1 Armor.";
+            case TACTICAL:
+                return "Once per Turn or Interval, you may take one of the following Actions " +
+                        "for 0 Stamina\n" +
+                        "Move up to half your Speed, minimum 2 Sectors.";
+            case MANEUVER:
+                return "You carefully move around the Battlefield.  You move one Sector, and this " +
+                        "movement cannot trigger Attacks of Opportunity";
+            case REPOSITION:
+                return "You may expend your ATP to move";
+        }
+        return "";
+    }
+
+    private void applyMovementTypeToAction(MoveAction action, MoveAction.MOVEMENTTYPE type) {
+        action.setMovementType(type);
+
+        FieldUnit actor = getUnitFromName(action.getActor());
+        int speed = (actor != null) ? Math.max(1, actor.getSpeed()) : 1;
+        int distance = Math.max(Math.abs(action.getDeltaX()),
+                Math.abs(action.getDeltaY()));   // Chebyshev
+
+        switch (type) {
+            case RUN, COVER -> {
+                action.staminaCost = staminaCostFor(type, distance, speed);
+                action.ATPCost     = 0;
+                action.setTactical(false);
+                action.setCanTriggerAtkofOp(true);
+            }
+            case TACTICAL -> {
+                action.staminaCost = 0;
+                action.ATPCost     = 0;
+                action.setTactical(true);
+                action.setCanTriggerAtkofOp(true);
+            }
+            case MANEUVER -> {
+                action.staminaCost = 1;
+                action.ATPCost     = 0;
+                action.setCanTriggerAtkofOp(false);
+                action.setTactical(false);
+            }
+            case REPOSITION -> {
+                action.staminaCost = 0;
+                action.ATPCost     = 1;
+                action.setTactical(false);
+                action.setCanTriggerAtkofOp(true);
+            }
+        }
+    }
+
 
     private void showTurnEndPopup() {
         FieldUnit unit = getUnitFromName(currentPlayer);
@@ -1418,6 +2472,7 @@ public class Game {
         checkShowPopUp();
         LogMessage("Current player set to: " + name);
         rebuildInventoryTab();
+        refreshStatsContainers();
     }
 
     private void checkShowPopUp() {
@@ -2403,10 +3458,14 @@ public class Game {
         if (unit == null || !(unit.getUnit() instanceof Evangelion)) {
             Label placeholder = new Label("Select an Evangelion to view inventory.");
             inventoryTab.getChildren().add(placeholder);
+            rebuildWeaponChooser();
+            rebuildAttackMenu();
             return;
         }
         Evangelion eva = (Evangelion) unit.getUnit();
         BuildEvangelionInventory(eva);
+        rebuildWeaponChooser();
+        rebuildAttackMenu();
     }
 
     private ScrollableContainer createContainer(double left, double width, double top, double height) {
@@ -2727,7 +3786,18 @@ public class Game {
     private ScrollableContainer attackScrollContainer;
     private ScrollableContainer atPowerScrollContainer;
     private ScrollableContainer otherScrollContainer;
-
+    // ---- Current-stats containers (right side of the battlefield bottom pane) ----
+// ---- Current-stats containers (right side of the battlefield bottom pane) ----
+    private ScrollableContainer currentStatsContainer;      // ALWAYS shows the current player's unit
+    private ScrollableContainer secondaryStatsContainer;    // shows the clicked/inspected unit
+    private FieldUnit statsUnit2 = null;                    // inspected unit (null = hidden)
+    /**
+     * Selector for {@link #getStatsForFieldUnit(FieldUnit, int)}.
+     *   0 = BASIC    – stamina / ATP / tactical / armor / toughness
+     *   1 = COMBAT   – BASIC + accuracy / attack strength / reflexes / speed
+     *   2 = FULL     – COMBAT + team / position / effects / turn-done
+     */
+    private int statsMode = 1;
     // ---- Battlefield tab ----
     private VBox buildBattlefieldTab() {
         VBox wrapper = new VBox(10);
@@ -2806,6 +3876,8 @@ public class Game {
             viewport.setCursor(Cursor.OPEN_HAND);
             viewport.setUserData(null);
         });
+
+
         viewport.setOnMouseDragged(e -> {
             if (e.getButton() != MouseButton.SECONDARY) return;
             double[] data = (double[]) viewport.getUserData();
@@ -2855,9 +3927,40 @@ public class Game {
                         "-fx-background-color: rgba(40,40,40,0.950000);" +
                         "-fx-background-insets: 0;");
 
+
+        // ----- CurrentStats container — occupies the remaining right area -----
+        currentStatsContainer = new ScrollableContainer(
+                0.50, 0.49, 0.02, 0.96, false, false);
+        currentStatsContainer.setContainerPadding(new Insets(10));
+        currentStatsContainer.setSpacing(6);
+        currentStatsContainer.setBackgroundColor(Color.rgb(235, 240, 255, 0.95), true);
+        currentStatsContainer.setBorderStyle(
+                "-fx-border-color: #333366; -fx-border-width: 2; -fx-border-radius: 4;");
+        currentStatsContainer.setFitToHeight(true);
+        currentStatsContainer.setStyle(
+                "-fx-background: rgba(235,240,255,0.950000);" +
+                        "-fx-background-color: rgba(235,240,255,0.950000);" +
+                        "-fx-background-insets: 0;");
+        currentStatsContainer.addNode(new Label("Click a unit on the battlefield to see its stats."));
+
+// ----- Secondary stats container (for a 2nd selected unit), hidden by default -----
+        secondaryStatsContainer = new ScrollableContainer(
+                0.75, 0.24, 0.02, 0.96, false, false);
+        secondaryStatsContainer.setContainerPadding(new Insets(10));
+        secondaryStatsContainer.setSpacing(6);
+        secondaryStatsContainer.setBackgroundColor(Color.rgb(255, 245, 235, 0.95), true);
+        secondaryStatsContainer.setBorderStyle(
+                "-fx-border-color: #663333; -fx-border-width: 2; -fx-border-radius: 4;");
+        secondaryStatsContainer.setFitToHeight(true);
+        secondaryStatsContainer.setStyle(
+                "-fx-background: rgba(255,245,235,0.950000);" +
+                        "-fx-background-color: rgba(255,245,235,0.950000);" +
+                        "-fx-background-insets: 0;");
+        secondaryStatsContainer.setVisible(false);
+
 // ----- Move container — warm yellow -----
         moveScrollContainer = new ScrollableContainer(
-                0.21, 0.78, 0.02, 0.96, false, false);
+                0.21, 0.28, 0.02, 0.96, false, false);
         moveScrollContainer.setContainerPadding(new Insets(10));
         moveScrollContainer.setSpacing(8);
         moveScrollContainer.setBackgroundColor(Color.rgb(255, 244, 200, 0.95), true); // pale goldenrod
@@ -2871,10 +3974,10 @@ public class Game {
 
 // ----- Attack container — warm red -----
         attackScrollContainer = new ScrollableContainer(
-                0.21, 0.78, 0.02, 0.96, false, false);
+                0.21, 0.28, 0.02, 0.96, false, false);
         attackScrollContainer.setContainerPadding(new Insets(10));
         attackScrollContainer.setSpacing(8);
-        attackScrollContainer.setBackgroundColor(Color.rgb(255, 220, 220, 0.95), true); // pale red
+        attackScrollContainer.setBackgroundColor(Color.rgb(255, 220, 220, 0.95), true);
         attackScrollContainer.setBorderStyle(
                 "-fx-border-color: #8b0000; -fx-border-width: 2; -fx-border-radius: 4;");
         attackScrollContainer.setFitToHeight(true);
@@ -2885,7 +3988,7 @@ public class Game {
 
 // ----- ATPower container — cool blue -----
         atPowerScrollContainer = new ScrollableContainer(
-                0.21, 0.78, 0.02, 0.96, false, false);
+                0.21, 0.28, 0.02, 0.96, false, false);
         atPowerScrollContainer.setContainerPadding(new Insets(10));
         atPowerScrollContainer.setSpacing(8);
         atPowerScrollContainer.setBackgroundColor(Color.rgb(215, 235, 255, 0.95), true); // pale steel blue
@@ -2899,7 +4002,7 @@ public class Game {
 
 // ----- Other container — neutral gray -----
         otherScrollContainer = new ScrollableContainer(
-                0.21, 0.78, 0.02, 0.96, false, false);
+                0.21, 0.28, 0.02, 0.96, false, false);
         otherScrollContainer.setContainerPadding(new Insets(10));
         otherScrollContainer.setSpacing(8);
         otherScrollContainer.setBackgroundColor(Color.rgb(235, 235, 235, 0.95), true); // light gray
@@ -2915,14 +4018,16 @@ public class Game {
         bottomPanel.getChildren().addAll(
                 buttonScrollContainer,
                 moveScrollContainer, attackScrollContainer,
-                atPowerScrollContainer, otherScrollContainer);
+                atPowerScrollContainer, otherScrollContainer,
+                currentStatsContainer, secondaryStatsContainer);
+
 
         buttonScrollContainer.bindToRegion(bottomPanel);
         moveScrollContainer.bindToRegion(bottomPanel);
         attackScrollContainer.bindToRegion(bottomPanel);
         atPowerScrollContainer.bindToRegion(bottomPanel);
         otherScrollContainer.bindToRegion(bottomPanel);
-
+        layoutStatsContainers(false);
         // ----- Populate the buttons container -----
         BetterButton moveBtn = new BetterButton("Move");
         moveBtn.setPrimaryStyle();
@@ -2950,7 +4055,7 @@ public class Game {
         moveLabel.setStyle(
                 "-fx-font-weight: bold;" +
                         "-fx-font-size: 14px;" +
-                        "-fx-text-fill: #8a6800;" +            // dark goldenrod
+                        "-fx-text-fill: #8a6800;" +
                         "-fx-padding: 0 0 4 0;"
         );
         moveScrollContainer.addNode(moveLabel);
@@ -2958,21 +4063,31 @@ public class Game {
         BetterButton runBtn = new BetterButton("Run");
         runBtn.setPrimaryStyle();
         runBtn.setMaxWidth(Double.MAX_VALUE);
+        runBtn.setOnAction(e -> startMoveVisualization(MoveAction.MOVEMENTTYPE.RUN));
         moveScrollContainer.addNode(runBtn);
+
+        BetterButton tacticalBtn = new BetterButton("Tactical");
+        tacticalBtn.setPrimaryStyle();
+        tacticalBtn.setMaxWidth(Double.MAX_VALUE);
+        tacticalBtn.setOnAction(e -> startMoveVisualization(MoveAction.MOVEMENTTYPE.TACTICAL));
+        moveScrollContainer.addNode(tacticalBtn);
 
         BetterButton maneuverBtn = new BetterButton("Maneuver");
         maneuverBtn.setPrimaryStyle();
         maneuverBtn.setMaxWidth(Double.MAX_VALUE);
+        maneuverBtn.setOnAction(e -> startMoveVisualization(MoveAction.MOVEMENTTYPE.MANEUVER));
         moveScrollContainer.addNode(maneuverBtn);
 
         BetterButton coverBtn = new BetterButton("Cover");
         coverBtn.setPrimaryStyle();
         coverBtn.setMaxWidth(Double.MAX_VALUE);
+        coverBtn.setOnAction(e -> startMoveVisualization(MoveAction.MOVEMENTTYPE.COVER));
         moveScrollContainer.addNode(coverBtn);
 
         BetterButton repositionBtn = new BetterButton("Reposition");
         repositionBtn.setPrimaryStyle();
         repositionBtn.setMaxWidth(Double.MAX_VALUE);
+        repositionBtn.setOnAction(e -> startMoveVisualization(MoveAction.MOVEMENTTYPE.REPOSITION));
         moveScrollContainer.addNode(repositionBtn);
 
         // ----- Populate Attack content -----
@@ -3007,34 +4122,47 @@ public class Game {
 
         // ----- Only one content container visible at a time -----
         moveScrollContainer.setVisible(true);
+        startMoveVisualization(MoveAction.MOVEMENTTYPE.RUN);
         attackScrollContainer.setVisible(false);
         atPowerScrollContainer.setVisible(false);
         otherScrollContainer.setVisible(false);
 
         // ----- Toggle buttons switch the visible content container -----
+        // ----- Toggle buttons switch the visible content container -----
         moveBtn.setOnAction(e -> {
+            clearAttackVisualization();
             moveScrollContainer.setVisible(true);
             attackScrollContainer.setVisible(false);
             atPowerScrollContainer.setVisible(false);
             otherScrollContainer.setVisible(false);
+            attackWeaponChooserContainer.setVisible(false);
+            startMoveVisualization(MoveAction.MOVEMENTTYPE.RUN);
         });
         attackBtn.setOnAction(e -> {
+            clearMovementVisualization();
             moveScrollContainer.setVisible(false);
             attackScrollContainer.setVisible(true);
             atPowerScrollContainer.setVisible(false);
             otherScrollContainer.setVisible(false);
+            attackWeaponChooserContainer.setVisible(true);
+            rebuildWeaponChooser();
+            rebuildAttackMenu();
         });
         atPowerBtn.setOnAction(e -> {
+            clearAttackVisualization();
             moveScrollContainer.setVisible(false);
             attackScrollContainer.setVisible(false);
             atPowerScrollContainer.setVisible(true);
             otherScrollContainer.setVisible(false);
+            attackWeaponChooserContainer.setVisible(false);
         });
         otherBtn.setOnAction(e -> {
+            clearAttackVisualization();
             moveScrollContainer.setVisible(false);
             attackScrollContainer.setVisible(false);
             atPowerScrollContainer.setVisible(false);
             otherScrollContainer.setVisible(true);
+            attackWeaponChooserContainer.setVisible(false);
         });
 
         // ----- Main layout -----
@@ -3043,11 +4171,274 @@ public class Game {
         battlePane.setBottom(bottomPanel);
         VBox.setVgrow(battlePane, Priority.ALWAYS);
 
+        // ============================================================
+        //  Attack weapon chooser — added directly to battlePane.
+        //  Hidden until Attack mode is toggled on.
+        // ============================================================
+        attackWeaponChooserContainer = new ScrollableContainer(
+                0.01, 0.10, 0.02, 0.3, false, false);
+        attackWeaponChooserContainer.setContainerPadding(new Insets(10));
+        attackWeaponChooserContainer.setSpacing(6);
+
+        attackWeaponChooserContainer.setBackgroundColor(Color.rgb(255, 235, 235, 0.95), true);
+        attackWeaponChooserContainer.setBorderStyle(
+                "-fx-border-color: #8b0000; -fx-border-width: 2; -fx-border-radius: 4;");
+        attackWeaponChooserContainer.setFitToHeight(true);
+        attackWeaponChooserContainer.setStyle(
+                "-fx-background: rgba(255,235,235,0.950000);" +
+                        "-fx-background-color: rgba(255,235,235,0.950000);" +
+                        "-fx-background-insets: 0;");
+        attackWeaponChooserContainer.setVisible(false);
+        attackWeaponChooserContainer.bindToRegion(battlePane);
+
+// 1. Actually put it in the scene graph.
+        battlePane.getChildren().add(attackWeaponChooserContainer);
+
+// 2. BorderPane ignores children that aren't in a named slot, so
+//    nothing will ever autosize the chooser for us. Drive its size
+//    ourselves whenever battlePane changes size.
+        Runnable syncChooserSize = attackWeaponChooserContainer::autosize;
+        battlePane.widthProperty() .addListener((o, a, b) -> syncChooserSize.run());
+        battlePane.heightProperty().addListener((o, a, b) -> syncChooserSize.run());
+
+// First time it becomes sized (before the initial layout pass, width = 0)
+        Platform.runLater(syncChooserSize);
+
         wrapper.getChildren().add(battlePane);
         return wrapper;
+
+    }
+
+
+    // ============================================================
+//   CURRENT-STATS CONTAINERS
+// ============================================================
+
+    /**
+     * Case-insensitive-safe lookup that does NOT log on failure. Used by the
+     * stats containers so that an unassigned current player (e.g. "DM") doesn't
+     * spam the log on every refresh.
+     */
+    private FieldUnit findUnitSilent(String name) {
+        if (name == null) return null;
+        for (FieldUnit u : UnitList) {
+            if (u.getName().equals(name)) return u;
+        }
+        return null;
+    }
+
+    /**
+     * (Re)binds the stats containers to the bottom panel.
+     * When {@code split} is false, {@link #currentStatsContainer} uses the whole
+     * remaining area. When {@code split} is true, it shrinks to half and
+     * {@link #secondaryStatsContainer} occupies the other half.
+     */
+    private void layoutStatsContainers(boolean split) {
+        // Clear previous bindings
+        currentStatsContainer.layoutXProperty().unbind();
+        currentStatsContainer.layoutYProperty().unbind();
+        currentStatsContainer.prefWidthProperty().unbind();
+        currentStatsContainer.prefHeightProperty().unbind();
+        secondaryStatsContainer.layoutXProperty().unbind();
+        secondaryStatsContainer.layoutYProperty().unbind();
+        secondaryStatsContainer.prefWidthProperty().unbind();
+        secondaryStatsContainer.prefHeightProperty().unbind();
+
+        // Vertical placement is identical in both layouts
+        currentStatsContainer.layoutYProperty()
+                .bind(bottomPanel.heightProperty().multiply(0.02));
+        currentStatsContainer.prefHeightProperty()
+                .bind(bottomPanel.heightProperty().multiply(0.96));
+        secondaryStatsContainer.layoutYProperty()
+                .bind(bottomPanel.heightProperty().multiply(0.02));
+        secondaryStatsContainer.prefHeightProperty()
+                .bind(bottomPanel.heightProperty().multiply(0.96));
+
+        if (split) {
+            currentStatsContainer.layoutXProperty()
+                    .bind(bottomPanel.widthProperty().multiply(0.50));
+            currentStatsContainer.prefWidthProperty()
+                    .bind(bottomPanel.widthProperty().multiply(0.24));
+            secondaryStatsContainer.layoutXProperty()
+                    .bind(bottomPanel.widthProperty().multiply(0.75));
+            secondaryStatsContainer.prefWidthProperty()
+                    .bind(bottomPanel.widthProperty().multiply(0.24));
+        } else {
+            currentStatsContainer.layoutXProperty()
+                    .bind(bottomPanel.widthProperty().multiply(0.50));
+            currentStatsContainer.prefWidthProperty()
+                    .bind(bottomPanel.widthProperty().multiply(0.49));
+        }
+    }
+
+    /**
+     * Called when a unit is clicked on the battlefield. Puts that unit into the
+     * secondary (right-hand) stats container.
+     *
+     * The primary container is always reserved for the current player's unit and
+     * is unaffected by this call.
+     */
+    public void showStatsForUnit(FieldUnit unit) {
+        if (unit == null || !unit.isExists()) return;
+        statsUnit2 = unit;
+        refreshStatsContainers();
+    }
+
+    /**
+     * Hides the secondary stats container. Called when the user clicks an empty
+     * sector, or when the previously inspected unit no longer exists.
+     */
+    public void clearSecondaryStats() {
+        if (statsUnit2 == null) return;
+        statsUnit2 = null;
+        refreshStatsContainers();
+    }
+
+    /**
+     * Rebuilds both stats containers.
+     *
+     *   • Primary   — always the unit whose name equals {@link #currentPlayer}.
+     *                 If there is no such unit (e.g. current player is "DM"
+     *                 or a player who hasn't spawned yet), a placeholder is shown.
+     *   • Secondary — the most recently inspected unit, or hidden if none.
+     */
+    public void refreshStatsContainers() {
+        if (currentStatsContainer == null || secondaryStatsContainer == null) return;
+
+        currentStatsContainer.clearNodes();
+        secondaryStatsContainer.clearNodes();
+
+        // ---------- Primary: current player ----------
+        FieldUnit primary = null;
+        if (currentPlayer != null && !currentPlayer.isEmpty()
+                && !currentPlayer.equalsIgnoreCase("DM")) {
+            primary = findUnitSilent(currentPlayer);
+        }
+
+        if (primary == null || !primary.isExists()) {
+            Label placeholder = new Label(
+                    "No unit to show for current player '"
+                            + (currentPlayer == null ? "" : currentPlayer) + "'.");
+            placeholder.setWrapText(true);
+            placeholder.setStyle("-fx-text-fill: #666; -fx-font-style: italic;");
+            currentStatsContainer.addNode(placeholder);
+        } else {
+            currentStatsContainer.addNode(getStatsForFieldUnit(primary, statsMode));
+        }
+
+        // ---------- Secondary: inspected unit ----------
+        if (statsUnit2 == null || !statsUnit2.isExists()) {
+            statsUnit2 = null;
+            secondaryStatsContainer.setVisible(false);
+            layoutStatsContainers(false);
+        } else {
+            secondaryStatsContainer.addNode(getStatsForFieldUnit(statsUnit2, statsMode));
+            secondaryStatsContainer.setVisible(true);
+            layoutStatsContainers(true);
+        }
+    }
+
+    /**
+     * Builds the stats panel for a single {@link FieldUnit}.
+     *
+     * @param unit the unit whose stats are shown (may be null → returns placeholder)
+     * @param mode 0 = BASIC   (stamina / ATP / tactical / armor / toughness)
+     *             1 = COMBAT  (BASIC + accuracy / attack strength / reflexes / speed)
+     *             2 = FULL    (COMBAT + team / position / effects / turn-done)
+     *             Negative values are treated as 0; values &gt; 2 are treated as 2.
+     * @return a JavaFX {@link Node} ready to be added to a container.
+     */
+    public Node getStatsForFieldUnit(FieldUnit unit, int mode) {
+        VBox box = new VBox(4);
+        box.setFillWidth(true);
+
+        if (unit == null || !unit.isExists()) {
+            Label placeholder = new Label("No unit selected.");
+            placeholder.setStyle("-fx-text-fill: #666; -fx-font-style: italic;");
+            box.getChildren().add(placeholder);
+            return box;
+        }
+
+        // ---------------- Header ----------------
+        Label nameLabel = new Label(unit.getName());
+        nameLabel.setStyle(
+                "-fx-font-size: 16px; -fx-font-weight: bold; -fx-text-fill: #1a1a4d;");
+        box.getChildren().add(nameLabel);
+
+        if (unit.getUnit() != null) {
+            Label typeLabel = new Label(unit.getUnit().getClass().getSimpleName()
+                    + "   (Team " + unit.getTeam() + ")");
+            typeLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #555;");
+            box.getChildren().add(typeLabel);
+        }
+
+        box.getChildren().add(new Separator());
+
+        // ---------------- BASIC ----------------
+        Label basicHeader = new Label("Core");
+        basicHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #1a1a4d;");
+        box.getChildren().add(basicHeader);
+
+        Label stamina = new Label(
+                "Stamina:   " + unit.getStamina() + " / " + unit.getMaxStamina());
+        Label atp = new Label(
+                "ATP:       " + unit.getATP() + " / " + unit.getMaxATP());
+        box.getChildren().addAll(stamina, atp);
+
+        Label tactical = new Label("Tactical:  "
+                + (unit.hasTactical() ? "Available" : "Used"));
+        tactical.setStyle(unit.hasTactical()
+                ? "-fx-text-fill: #2e7d32; -fx-font-weight: bold;"
+                : "-fx-text-fill: #b00020; -fx-font-weight: bold;");
+        box.getChildren().add(tactical);
+
+        Label armor = new Label("Armor:     " + unit.getArmor());
+        Label toughness = new Label(
+                "Toughness: " + unit.getToughness() + " / " + unit.getMaxToughness());
+        box.getChildren().addAll(armor, toughness);
+
+        if (mode < 1) return box;
+
+        // ---------------- COMBAT ----------------
+        box.getChildren().add(new Separator());
+        Label combatHeader = new Label("Combat");
+        combatHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #1a1a4d;");
+        box.getChildren().add(combatHeader);
+
+        box.getChildren().addAll(
+                new Label("Accuracy:        " + unit.getAccuracy()),
+                new Label("Attack Strength: " + unit.getAttackStrength()),
+                new Label("Reflexes:        " + unit.getReflexes()),
+                new Label("Speed:           " + unit.getSpeed())
+        );
+
+        if (mode < 2) return box;
+
+        // ---------------- FULL ----------------
+        box.getChildren().add(new Separator());
+        Label fullHeader = new Label("Details");
+        fullHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #1a1a4d;");
+        box.getChildren().add(fullHeader);
+
+        box.getChildren().addAll(
+                new Label("Team:       " + unit.getTeam()),
+                new Label("Position:   (" + unit.getX() + ", " + unit.getY() + ")"),
+                new Label("Effects:    " + unit.getCurrentEffects().size()),
+                new Label("Turn done:  " + (unit.isTurnDone() ? "yes" : "no")),
+                new Label("Guarded:    " + (unit.usedGuard() ? "yes" : "no"))
+        );
+
+        return box;
+    }
+
+    /** Optional: change the stats depth at runtime. */
+    public void setStatsMode(int mode) {
+        this.statsMode = Math.max(0, Math.min(2, mode));
+        refreshStatsContainers();
     }
 
     // ---- Bottom Button Bar (unchanged) ----
+    // ---- Bottom Button Bar ----
     private HBox buildButtonBar() {
         HBox bar = new HBox(15);
         bar.setPadding(new Insets(10));
@@ -3075,6 +4466,17 @@ public class Game {
         dmBtn.setOnAction(e -> showTab(dmTab));
         dmBtn.disableProperty().bind(dmMode.not());
 
+        // ----- NEW: Toggle the battlefield bottom panel -----
+        BetterButton toggleBottomBtn = new BetterButton("Hide Panel");
+        toggleBottomBtn.setPrimaryStyle();
+        toggleBottomBtn.setOnAction(e -> {
+            if (bottomPanel == null) return;
+            boolean nowVisible = !bottomPanel.isVisible();
+            bottomPanel.setVisible(nowVisible);
+            bottomPanel.setManaged(nowVisible);   // let the BorderPane reclaim the space
+            toggleBottomBtn.setText(nowVisible ? "Hide Panel" : "Show Panel");
+        });
+
         BetterButton optionsBtn = new BetterButton("Options");
         optionsBtn.setPrimaryStyle();
         optionsBtn.setOnAction(e -> showOptionsDialog());
@@ -3083,9 +4485,8 @@ public class Game {
         exitBtn.setDangerStyle();
         exitBtn.setOnAction(e -> stage.close());
 
-
-
-        bar.getChildren().addAll(bfBtn, invBtn, chatBtn, weaponCreatorBtn, dmBtn, optionsBtn, exitBtn);
+        bar.getChildren().addAll(bfBtn, invBtn, chatBtn, weaponCreatorBtn,
+                dmBtn, toggleBottomBtn, optionsBtn, exitBtn);
         return bar;
     }
 
@@ -3225,7 +4626,7 @@ public class Game {
             }
         }
 
-        board.UpdateBoardColors();
+        board.SetBoardColorsToSectoryTypes();
         return board;
     }
 
@@ -3551,6 +4952,113 @@ public class Game {
             event.consume();
         });
     }
+
+
+    // ============================================================
+    //   GENERIC SECTOR VISUALISATION LAYER
+    // ============================================================
+    //
+    // The layer is independent of what it's being used for: movement
+    // previews, attack ranges, effect areas, etc. Add entries with
+    // addToVisualisationLayer(), then call applyVisualisation().
+    //
+    // applyVisualisation() always resets the board to its base sector
+    // colors first, then blends each tinted sector with its base color,
+    // so a highlighted Grass sector will still look different from a
+    // highlighted Concrete sector.
+
+    /** Blends this much of the tint into the base color when drawing. */
+    private static final double VIS_TINT_RATIO = 0.60;
+
+    /** Border applied to tinted sectors so they pop. */
+    private static final Color VIS_BORDER = Color.rgb(255, 200, 0);
+
+    private static String sectorKey(int x, int y) { return x + "," + y; }
+
+    /** Adds (or replaces) a tint on sector (x, y). Does NOT repaint. */
+    private void addToVisualisationLayer(int x, int y, Color tint) {
+        visualisationLayer.put(sectorKey(x, y), tint);
+    }
+
+    /** Removes the tint from sector (x, y). Does NOT repaint. */
+    private void removeFromVisualisationLayer(int x, int y) {
+        visualisationLayer.remove(sectorKey(x, y));
+    }
+
+    /** Clears the entire layer and repaints the board. */
+    private void clearVisualisationLayer() {
+        visualisationLayer.clear();
+        applyVisualisation();
+    }
+
+    /** True if sector (x, y) currently has a tint applied. */
+    private boolean isInVisualisationLayer(int x, int y) {
+        return visualisationLayer.containsKey(sectorKey(x, y));
+    }
+
+    /**
+     * Repaints the entire board:
+     *   1) Every sector is reset to its base SectorType color.
+     *   2) Every sector that has a tint in the layer is repainted with
+     *      a blend of its base color and the tint, plus a highlight border.
+     *
+     * Safe to call repeatedly. Call this after any change to the layer
+     * or after any event that may have re-painted sectors (e.g. moves,
+     * creations, deletions).
+     */
+    private void applyVisualisation() {
+        if (gameBoard == null) return;
+
+        // 1. Reset every sector to its base color.
+        gameBoard.SetBoardColorsToSectoryTypes();
+
+        // 2. Blend tints on top.
+        for (Map.Entry<String, Color> e : visualisationLayer.entrySet()) {
+            String[] parts = e.getKey().split(",");
+            int x, y;
+            try {
+                x = Integer.parseInt(parts[0]);
+                y = Integer.parseInt(parts[1]);
+            } catch (NumberFormatException ex) {
+                continue;
+            }
+            Sector s = gameBoard.getSector(x, y);
+            if (s == null || s.getType() == null) continue;
+
+            Color base = s.getType().getColor();
+            Color tint = e.getValue();
+            Color blended = blendColors(base, tint, VIS_TINT_RATIO);
+
+            s.setBackground(new Background(new BackgroundFill(
+                    blended, CornerRadii.EMPTY, Insets.EMPTY)));
+            s.setBorder(new Border(new BorderStroke(
+                    VIS_BORDER, BorderStrokeStyle.SOLID,
+                    CornerRadii.EMPTY, new BorderWidths(1.2))));
+        }
+    }
+
+    /** ratio = 0 → base, ratio = 1 → tint. Returns an opaque color. */
+    private static Color blendColors(Color base, Color tint, double ratio) {
+        double r = base.getRed()   * (1 - ratio) + tint.getRed()   * ratio;
+        double g = base.getGreen() * (1 - ratio) + tint.getGreen() * ratio;
+        double b = base.getBlue()  * (1 - ratio) + tint.getBlue()  * ratio;
+        return new Color(r, g, b, 1.0);
+    }
+
+    /** Tint color used for a given movement subtype. */
+    private static Color movementTint(MoveAction.MOVEMENTTYPE mode) {
+        switch (mode) {
+            case RUN:        return Color.rgb(255, 235, 100);   // yellow
+            case COVER:      return Color.rgb(120, 220, 120);   // green
+            case TACTICAL:   return Color.rgb(120, 170, 255);   // blue
+            case MANEUVER:   return Color.rgb(255, 170, 100);   // orange
+            case REPOSITION: return Color.rgb(200, 120, 255);   // purple
+        }
+        return Color.rgb(180, 180, 180);
+    }
+
+
+
     // ============================================================
     //   LAUNCH METHODS
     // ============================================================

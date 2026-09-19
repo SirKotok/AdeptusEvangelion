@@ -1,5 +1,7 @@
 package eva.evangelion.units.battle;
 
+import eva.evangelion.items.Weapon.AttackProfile;
+import eva.evangelion.units.active.Slot;
 import eva.evangelion.units.type.EvangelionType;
 import javafx.scene.paint.Paint;
 import javafx.scene.shape.Circle;
@@ -90,6 +92,27 @@ public class FieldUnit {
 
     public void setATP(int ATP) {
         this.ATP = ATP;
+    }
+    public void useATP(int ATP) {
+        this.ATP -= ATP;
+    }
+    public void useStamina(int Stamina) {
+        this.Stamina -= Stamina;
+    }
+    public void useTactical(boolean yes){
+        if (yes) setUsedTactical(true);
+    }
+
+    public List<AttackProfile> getUnitAttackProfiles(){
+        List<AttackProfile> profiles = new ArrayList<>();
+        profiles.add(new AttackProfile("Test 1", 2, 5, 0, AttackProfile.ProfileTypes.BASIC, false));
+        profiles.add(new AttackProfile("Test 2", 4, 2, 2, AttackProfile.ProfileTypes.BASIC, false));
+        return profiles;   // <-- was: return null;
+    }
+    public List<Slot> getSlots(){
+        if (this.unit instanceof Evangelion eva)
+        {return  eva.getSlots();}
+        else return null;
     }
 
     public void setMaxATP(int maxATP) {

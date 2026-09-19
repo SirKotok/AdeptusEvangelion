@@ -16,6 +16,8 @@ public class AttackProfile implements Serializable {
      // Area = -1 -> Normal Attack
      // Area = 0+ -> Area Attack
     public int ATP;
+    public int MinRange = 0;   // minimum distance (sectors) for a normal hit
+    public int MaxRange = 1;   // maximum distance (sectors) for a normal hit
     public String name;
     public boolean Ranged;
     public boolean isRanged() {
@@ -23,6 +25,46 @@ public class AttackProfile implements Serializable {
     }
     public void setRanged(boolean ranged) {
         Ranged = ranged;
+    }
+
+
+    /** True if `distance` (Chebyshev) is inside this profile's valid range. */
+    public boolean isInRange(int distance) {
+        return distance <= MaxRange;
+    }
+
+    public int getMinRange() {
+        return MinRange;
+    }
+
+    public int getMaxRange() {
+        return MaxRange;
+    }
+
+    /** True if `distance` is below the minimum range (target too close). */
+    public boolean isTooClose(int distance) {
+        return distance < MinRange;
+    }
+    /** Deep-ish copy: primitives are copied by value, the AttackProperties
+     *  list is cloned so the copy can be mutated without touching the original. */
+    public AttackProfile copy() {
+        AttackProfile c = new AttackProfile(
+                this.name,
+                this.Dice,
+                this.Dicepower,
+                this.Power,
+                this.Stamina,
+                this.ATP,
+                this.Ranged,
+                this.ProfileType
+        );
+        c.MinRange = this.MinRange;
+        c.MaxRange = this.MaxRange;
+        c.AmmoCost     = this.AmmoCost;
+        c.Penetration  = this.Penetration;
+        c.AreaType     = this.AreaType;
+        c.AttackProperties = new ArrayList<>(this.AttackProperties);
+        return c;
     }
 
     public enum ProfileTypes {

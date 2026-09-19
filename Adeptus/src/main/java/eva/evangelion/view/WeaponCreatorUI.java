@@ -694,6 +694,15 @@ public class WeaponCreatorUI extends Pane {
         w.setBasePenetration(currentType.basePenetration);
         w.setBaseArea(currentType.baseArea);
         w.setDisplayIcon(selectedIcon);
+        // ---- Range ----
+        if (currentType.ranged) {
+            w.setMinRange(currentType.minRange);
+            w.setMaxRange(Math.max(1, currentType.maxRange));
+        } else {
+            w.setMinRange(0);
+            // Reach is handled by getWeaponProfiles() extending to 3
+            w.setMaxRange(1);
+        }
 
         for (Map.Entry<Weapon.Customisation, CheckBox> entry : customCheckBoxes.entrySet()) {
             if (entry.getValue().isSelected()) {

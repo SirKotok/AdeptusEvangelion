@@ -1,6 +1,5 @@
 package eva.evangelion.items.Weapon;
 
-import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -11,7 +10,13 @@ public class Weapon extends Item {
     public boolean isActiveTech() {
         return ActiveTech;
     }
+    private int minRange = 0;
+    private int maxRange = 1;
 
+    public int getMinRange() { return minRange; }
+    public int getMaxRange() { return maxRange; }
+    public void setMinRange(int minRange) { this.minRange = Math.max(0, minRange); }
+    public void setMaxRange(int maxRange) { this.maxRange = Math.max(1, maxRange); }
 
     public enum Tech {
         NONE, CHAIN, PROGRESSIVE, POLYTHERMIC, SUPERCONDUCTIVE, GAUSS, N2SHELL, MASER, POSITRON;
@@ -54,7 +59,7 @@ Positron Weapons pierce all manner of protections with ease.  Positron Weapons h
 
         public Tech nextTechNoNone() {
             Tech[] values = Tech.values();
-            int shifted = (this.ordinal() - 1); // Shift to exclude NONE
+             int shifted = (this.ordinal() - 1); // Shift to exclude NONE
             int nextShifted = (shifted + 1) % 8; // 8 non-NONE values
             int nextIndex = nextShifted + 1;
             return values[nextIndex];
@@ -115,45 +120,7 @@ Positron Weapons pierce all manner of protections with ease.  Positron Weapons h
     public enum Customisation {
         ANTI_ARMOR, BALANCED, DOUBLE_EDGED, EXPLOSIVE, EXTRA_AMMO, REINFORCED, THROWING, BAYONET, ENHANCED_BAYONET, TELESCOPIC_SIGHT, AUTO_LOADER
     }
-    // Anti armor increased penetration by 1
-    // Balanced increased defensive by 10
-    // double edged allows a second technology to be determined at turn start
-    // explosive - MELEE ONLY - gives a special attack
-    // Extra ammo - RANGED ONLY gives more ammo based on original ammo
-    // Reinforced
-    // Throwing - MELEE ONLY - gives a special attack
-    // Bayonet - RANGED ONLY - gives a special attack
-    // Enhanced Bayonet - RANGED ONLY - gives a special attack  (but you may apply a melee weapon technology to the Knife profile), cost 2 requisition
-    // Telescopic Sight - RANGED ONLY (modification)
-    // Autoloader - RANGED ONLY (modification)
-    /*
 
-
-   Anti-Armor
-Increase your Penetration by +1
-Balanced
-Melee Weapons only.  This weapon gains Defensive 10.
-Double Edged
-Melee Weapons only, and you must first apply a Weapon Technology at its normal cost for you in order to gain any benefit from this Customization.  You gain a second Technology which you can apply to your Weapon.  If your weapon is Progressive or Chain, you may choose from the Polythermic or Superconductive Technologies.  Alternatively, if your weapon is Polythermic or Superconductive, you can instead choose either the Progressive or Chain Technologies.  At the start of your turn, you decide which Technology to use for each Double Edged Weapon you are wielding—this choice remains in place until the start of your next turn.
-Explosive
-Melee Weapons only.  This Weapon gains 1 Ammo.  When you deal damage with this weapon, you can choose to expend Ammo to forgo rolling and instead deal maximum Damage.  Explosive Weapons cannot be reloaded.
-Extra Ammo
-Ranged Weapons only.  If the weapon has 5 or more Ammo capacity, it gains +2 Ammo, otherwise it gains +1 Ammo.
-Reinforced
-This Customization can only be applied to Shields.  Increase the Ablative Value of the Shield by 1.  This may be purchased twice, for a total Ablative Value of 3.
-Throwing
-Melee Weapons only.  The Weapon gains the Throwing property.  If your weapon is already Throwing, you extend its Range by 1 and the weapon returns to you on a Miss or the target’s successful Guard.
-Bayonet
-Ranged Weapons only.  This weapon incorporates a Knife that can make melee attacks.  The Knife cannot be independently upgraded nor have a Technology applied.  This Customization does not change how many hands it takes to wield the weapon.
-Enhanced Bayonet
-Ranged Weapons only.  As Bayonet, but you may apply a melee weapon technology to the Knife profile.  This Customization costs 2 Requisition.
-Telescopic Sight
-Ranged Weapons only.  When attacking an enemy at Range 3 or greater, your weapon gains Precise if it wasn’t Precise already.  If your weapon is already Precise, you instead gain +1 Damage on all Attack Actions you make at Range 3 or greater with this weapon, except for Blitz and Full Auto.
-Autoloader
-Ranged Weapons only.  Your weapon gains Spray if it did not have Spray already when making attacks at Range 3 or closer.  If your weapon already has Spray, once per Battle you can make a Blitz or Full Auto Attack with this weapon without expending Ammo.  This cannot be applied to weapons which have the Area Property.
-
-
-     */
 
 
     public enum Hand {
@@ -169,7 +136,7 @@ Ranged Weapons only.  Your weapon gains Spray if it did not have Spray already w
    public List<Customisation> Customisations = new ArrayList<>();
    public List<WeaponProperty> WeaponProperties = new ArrayList<>();
    public List<AttackProfile> SpecialProfiles = new ArrayList<>();
-   public boolean doesBasicProfiles;
+   public boolean doesNormalProfiles;
    public List<Tech> Technology = new ArrayList<>();
 
 
@@ -248,51 +215,65 @@ Ranged Weapons only.  Your weapon gains Spray if it did not have Spray already w
 
     public Tech CurrentTech = Tech.NONE;
 
-   public Weapon createBasicMeleeWeapon(String name, String type, Tech t, List<Customisation> Customisation, Hand h) {
+   public static Weapon createBasicMeleeWeapon(String name, String type, Tech t, List<Customisation> Customisation, Hand h) {
        Weapon w = new Weapon(name, type, h);
        w.Technology.add(t);
        w.Customisations = Customisation;
        w.Ranged = false;
-       doesBasicProfiles = true;
+       w.doesNormalProfiles = true;
        return w;
    }
-    public Weapon createBasicRangedWeapon(String name, String type, Tech t, List<Customisation> Customisation, int ammo, Hand h) {
+    public static Weapon createBasicRangedWeapon(String name,
+                                                 String type,
+                                                 Tech t,
+                                                 List<Customisation> Customisation,
+                                                 int ammo,
+                                                 Hand h) {
         Weapon w = new Weapon(name, type, h);
         w.Technology.add(t);
         w.Customisations = Customisation;
         w.Ranged = true;
-        doesBasicProfiles = true;
-        setAmmo(ammo);
-        setMaxAmmo(ammo);
+        w.doesNormalProfiles = true;
+        w.setAmmo(ammo);
+        w.setMaxAmmo(ammo);
         return w;
     }
 
-   public List<AttackProfile> getBasicProfiles(){
-       if (!doesBasicProfiles) return null;
+   public List<AttackProfile> getNormalProfiles(){
+       if (!doesNormalProfiles) return null;
        List<AttackProfile> profiles = new ArrayList<>();
        profiles.add(AttackProfile.createBasicAttack(this));
        profiles.add(AttackProfile.createBlitzAttack(this));
        if (this.isRanged()) profiles.add(AttackProfile.createFullAutoAttack(this));
+
+
+
        return profiles;
    }
 
+    public List<AttackProfile> getSpecialProfiles(){
+        return SpecialProfiles;
+    }
 
-  public List<AttackProfile> getSpecialProfiles(){
-       return SpecialProfiles;
-  }
 
-  public List<AttackProfile> getWeaponProfiles(){
-      if (!doesBasicProfiles) return getSpecialProfiles();
-      List<AttackProfile> profiles = getSpecialProfiles();
-      profiles.addAll(getBasicProfiles());
+  public List<AttackProfile> getWeaponProfiles(Tech tech){
+      CurrentTech = tech;
+      if (!doesNormalProfiles) return getSpecialProfiles();
+      List<AttackProfile> profiles = new ArrayList<>();
+      profiles.addAll(getNormalProfiles());
+      List<AttackProfile> profilesToRemove = new ArrayList<>();
       for (AttackProfile profile : profiles)  {
+
+
+
+
           if (getBaseArea() != -1 && profile.AreaType == -1) profile.AreaType = getBaseArea(); //set profile to correct area
           profile.Penetration+=getBasePenetration(); //Add basic penetration to profile;
 
           switch (CurrentTech) { // TODO CHAIN, GAUSS
               case POLYTHERMIC -> {
                   profile.Penetration++;
-                  if (isActiveTech()) {if (profile.Dice*profile.Dicepower < 7) {profile.Dice = 3;} else {profile.Dice = 4; profile.Power++;} profile.Dicepower = 3;}
+                 //TODO Polythermic handling {if (profile.Dice*profile.Dicepower < 7) {profile.Dice = 3;} else {profile.Dice = 4; profile.Power++;} profile.Dicepower = 3;}
               }
               case PROGRESSIVE, POSITRON -> profile.Penetration+=2;
               case SUPERCONDUCTIVE -> profile.Penetration+=1;
@@ -308,6 +289,7 @@ Ranged Weapons only.  Your weapon gains Spray if it did not have Spray already w
               case MASER -> {
                   profile.Penetration++;
                   if (isActiveTech()) {
+                      if (profile.AreaType > -1) profilesToRemove.add(profile);
                       profile.AreaType = -2;
                       profile.AmmoCost++;
                       profile.Penetration++;
@@ -317,6 +299,7 @@ Ranged Weapons only.  Your weapon gains Spray if it did not have Spray already w
 
           for (WeaponProperty property : WeaponProperties) {
               switch (property) { //TODO PENETRATION / LINE / AREA ??? DEFENSIVE // ABLATIVE
+                  //TODO remake profile effects
                   case GRAPPLE -> { profile.AttackProperties.add(AttackProfile.AttackProperty.GRAPPLE); // COMPLICATED
                   }
                   case INTRINSIC -> {profile.AttackProperties.add(AttackProfile.AttackProperty.INTRINSIC); // NONE
@@ -335,13 +318,31 @@ Ranged Weapons only.  Your weapon gains Spray if it did not have Spray already w
                   }
                   case SPRAY -> {profile.AttackProperties.add(AttackProfile.AttackProperty.SPRAY); // CHANGES BLITZ / FO
                   }
-                  case THROWING -> {profile.AttackProperties.add(AttackProfile.AttackProperty.THROWING); // NEW THROWING PROFILE
-                  }
+                //TODO  case THROWING -> {profile.AttackProperties.add(AttackProfile.AttackProperty.THROWING);} // NEW THROWING PROFILE
+
                   case ARMORPIERCING -> { profile.AttackProperties.add(AttackProfile.AttackProperty.ARMORPIERCING); // DURING ATTACK
                   }
               }
           }
+
+          profile.MinRange = this.minRange;
+          profile.MaxRange = this.maxRange;
+
+          // Reach extends melee reach to 3 sectors
+          boolean hasReachProperty = this.WeaponProperties != null
+                  && this.WeaponProperties.contains(WeaponProperty.REACH);
+          boolean profileHasReach = profile.AttackProperties != null
+                  && profile.AttackProperties.contains(AttackProfile.AttackProperty.REACH);
+
+          if (!this.isRanged() && (hasReachProperty || profileHasReach)) {
+              profile.MinRange = 1;
+              profile.MaxRange = 3;
+          }
+
+
       }
+
+      profiles.removeAll(profilesToRemove);
 
       for (AttackProfile profile : profiles)  {
 
@@ -351,8 +352,14 @@ Ranged Weapons only.  Your weapon gains Spray if it did not have Spray already w
               }
           }
           }
-
-
+      // ADDING ADDITIONAL PROFILES:
+      for (Customisation custom : Customisations) {
+          switch(custom) {
+              case BAYONET -> {}
+              case THROWING -> {}
+          }
+      }
+      for (AttackProfile p : getSpecialProfiles()) profiles.add(p.copy()); //ADDING SPECIAL CUSTOM PROFILES IF THEY EXIST
 
 
       return profiles;

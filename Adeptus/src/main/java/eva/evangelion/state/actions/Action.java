@@ -10,7 +10,15 @@ public class Action implements Serializable {
     public final String actor;
     public int staminaCost = 0;
     public int ATPCost = 0;
+    public boolean isTactical = false;
 
+    public void setTactical(boolean tactical) {
+        isTactical = tactical;
+    }
+
+    public boolean isTactical() {
+        return isTactical;
+    }
 
     public Action(int actionNumber, String actor) {
         ActionNumber = actionNumber;

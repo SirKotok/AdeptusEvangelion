@@ -10,7 +10,6 @@ import javafx.scene.Scene;
 import javafx.scene.control.Label;
 import javafx.scene.control.Slider;
 import javafx.scene.control.TextField;
-import javafx.scene.image.Image;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.*;
 import javafx.scene.shape.Rectangle;
@@ -20,7 +19,6 @@ import kotlin.Triple;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 
 public class BattlefieldCreator {
 
@@ -152,7 +150,7 @@ public class BattlefieldCreator {
             Sector sector = Board.getSector(triple.getFirst(), triple.getSecond());
             if (sector != null) sector.setType(triple.getThird());
         }
-        Board.UpdateBoardColors();
+        Board.SetBoardColorsToSectoryTypes();
     }
 
     private void createGameBoard(int x, int y) {
@@ -180,7 +178,7 @@ public class BattlefieldCreator {
         for (Sector sector : Board.sectors) {
             sector.setType(Blank);
         }
-        Board.UpdateBoardColors();
+        Board.SetBoardColorsToSectoryTypes();
 
         setupMousePainting(gridPane);
         setUpSliders();

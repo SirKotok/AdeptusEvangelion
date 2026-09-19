@@ -25,17 +25,12 @@ public class GameBoard {
         boardheight = height;
         makeBoard(this.Board);
     }
-    public GameBoard(GridPane Board){
-        this.Board = Board;
-     //   this.Container = container;
-        makeBoard(this.Board);
-    }
+
 
     public void setPosition(double x, double y){
         Container.setLayoutX(x);
         Container.setLayoutY(y);
     }
-
 
 
     public void makeBoard(GridPane battleboard){
@@ -56,57 +51,16 @@ public class GameBoard {
     public boolean OnBoard(int x, int y) {
         return x >= 0 && x < boardwidth && y >= 0 && y < boardheight;
     }
-    public void UpdateBoardColors(){
+    public void SetBoardColorsToSectoryTypes(){
         for (Sector sector : sectors) {
-            ChangeColor(sector);
+            ChangeSectorColorToType(sector);
         }
     }
 
 
 
-    // Helper method to set yellow border with default background
-    private void setYellowBorder(Sector sector) {
+    public void ChangeSectorColorToType(Sector sector) {
         if (sector.getType() != null) {
-            // Set the background to the type's color with a yellow border
-            sector.setBackground(new Background(new BackgroundFill(
-                    sector.getType().getColor(),
-                    CornerRadii.EMPTY,
-                    Insets.EMPTY
-            )));
-
-            // Add a yellow border
-            sector.setBorder(new Border(new BorderStroke(
-                    Color.YELLOW,
-                    BorderStrokeStyle.SOLID,
-                    CornerRadii.EMPTY,
-                    new BorderWidths(1.2) // Border thickness
-            )));
-        }
-    }
-
-    // Helper method to set orange border with default background
-    private void setOrangeBorder(Sector sector) {
-        if (sector.getType() != null) {
-            // Set the background to the type's color with an orange border
-            sector.setBackground(new Background(new BackgroundFill(
-                    sector.getType().getColor(),
-                    CornerRadii.EMPTY,
-                    Insets.EMPTY
-            )));
-
-            // Add an orange border
-            sector.setBorder(new Border(new BorderStroke(
-                    Color.ORANGE,
-                    BorderStrokeStyle.SOLID,
-                    CornerRadii.EMPTY,
-                    new BorderWidths(1.2) // Border thickness
-            )));
-        }
-    }
-
-    public void ChangeColor(Sector sector) {
-        if (sector.getType() != null) {
-            // Reset to default: background only, no border
             sector.setBackground(new Background(new BackgroundFill(
                     sector.getType().getColor(),
                     CornerRadii.EMPTY,
@@ -116,8 +70,8 @@ public class GameBoard {
                     Color.BLACK,
                     BorderStrokeStyle.SOLID,
                     CornerRadii.EMPTY,
-                    new BorderWidths(0.5) // Border thickness
-            ))); // Remove any border
+                    new BorderWidths(0.5)
+            )));
         }
     }
 
@@ -125,52 +79,6 @@ public class GameBoard {
     public boolean isCover(Sector sector) {
         return false;
     }
-
-    public boolean SupportCheck(Sector sector) {
-        return sector.getType().SupportStructure;
-    }
-
-    public List<Sector> DrawSquare(Sector sector, int size, Color color) {
-        int startx = sector.x-size;
-        int starty = sector.y-size;
-        int endx = sector.x+size;
-        int endy = sector.y+size;
-        List<Sector> affected = new ArrayList<>();
-        for (Sector sector1 : sectors) {
-            if (sector1.x >= startx && sector1.x <= endx && sector1.y >= starty && sector1.y <= endy) {
-                sector1.setBackground(new Background(new BackgroundFill(color, CornerRadii.EMPTY, Insets.EMPTY)));
-                affected.add(sector1); }
-        }
-        return affected;
-    }
-    public List<Sector> DrawSquare(int x, int y, int size, Color color) {
-        int startx = x-size;
-        int starty = y-size;
-        int endx = x+size;
-        int endy = y+size;
-        List<Sector> affected = new ArrayList<>();
-        for (Sector sector1 : sectors) {
-            if (sector1.x >= startx && sector1.x <= endx && sector1.y >= starty && sector1.y <= endy) {
-                sector1.setBackground(new Background(new BackgroundFill(color, CornerRadii.EMPTY, Insets.EMPTY)));
-                affected.add(sector1); }
-        }
-        return affected;
-    }
-
-    public List<Sector> DrawSquareReplacable(int x, int y, int size, Color color) {
-        int startx = x-size;
-        int starty = y-size;
-        int endx = x+size;
-        int endy = y+size;
-        List<Sector> affected = new ArrayList<>();
-        for (Sector sector1 : sectors) {
-            if (sector1.x >= startx && sector1.x <= endx && sector1.y >= starty && sector1.y <= endy && sector1.type.CanMoveTo) {
-                sector1.setBackground(new Background(new BackgroundFill(color, CornerRadii.EMPTY, Insets.EMPTY)));
-                affected.add(sector1); }
-        }
-        return affected;
-    }
-
 
 
     public List<Sector> DrawLine(int startx, int starty, int endx, int endy, int stepx, int stepy, Color color) {
@@ -200,33 +108,9 @@ public class GameBoard {
 
 
 
-    public Sector getRandomSectorInRange(int CenterX, int CenterY, int range) {
-        int boardWidth = boardwidth;
-        int boardHeight = boardheight;
-
-        // Calculate valid X range (clamped to board boundaries)
-        int minX = Math.max(0, CenterX - range);
-        int maxX = Math.min(boardWidth - 1, CenterX + range);
-
-        // Calculate valid Y range (clamped to board boundaries)
-        int minY = Math.max(0, CenterY - range);
-        int maxY = Math.min(boardHeight - 1, CenterY + range);
-
-        Random random = new Random();
-
-        // Generate random coordinates within the valid range
-        int x = random.nextInt(maxX - minX + 1) + minX;
-        int y = random.nextInt(maxY - minY + 1) + minY;
-
-        // Return the corresponding Sector from the gameboard
-        return getSector(x, y); // See note below
-    }
-
-
-
     public void setType(Sector sector, SectorType type){
         sector.setType(type);
-        ChangeColor(sector);
+        ChangeSectorColorToType(sector);
     }
 
 
