@@ -2,6 +2,7 @@ package eva.evangelion.view;
 
 import eva.evangelion.gameboard.Battlefield;
 import eva.evangelion.state.GameState;
+import eva.evangelion.state.GameStateStore;
 import eva.evangelion.units.type.EvangelionIO;
 import eva.evangelion.view.UIElements.ToggleUIButton;
 import eva.evangelion.view.UIElements.ScrollableContainer;
@@ -50,6 +51,8 @@ public class MainMenu {
     private static final double ICON_CONTAINER_TOP = 0.3;
     private static final double ICON_CONTAINER_HEIGHT = 0.4;
 
+
+
     private Stage mainStage;
     private Scene mainScene;
     private Pane root;
@@ -72,6 +75,12 @@ public class MainMenu {
         createFolder("Active/weapons");
         createFolder("Created/evangelions");
         createFolder("Created/angels");
+        try {
+            GameStateStore.ensureDirs();
+            GameStateStore.migrateLegacy(java.nio.file.Paths.get("Active/gamestate.ser"));
+        } catch (IOException e) {
+            System.err.println("Could not set up game state folders: " + e.getMessage());
+        }
     }
 
     private static void createFolder(String path) {
@@ -507,8 +516,12 @@ public class MainMenu {
 
             if (createRadio.isSelected()) {
                 int playerCount = playerSpinner.getValue();
-                Game.startGame(dummyBattlefield, speed, fast, playerCount,
-                        "DM", true, selectedMode);
+                try {
+                    Game.startGame(dummyBattlefield, speed, fast, playerCount,
+                            "DM", true, selectedMode);
+                } catch (IOException ex) {
+                    throw new RuntimeException(ex);
+                }
             } else {
                 String playerName = nameField.getText().trim();
                 if (playerName.isEmpty()) {
@@ -517,7 +530,7 @@ public class MainMenu {
                     alert.showAndWait();
                     return;
                 }
-                File gameFile = new File("Active/gamestate.ser");
+                File gameFile = GameStateStore.file(GameStateStore.ACTIVE_DIR).toFile();
                 if (!gameFile.exists()) {
                     Alert alert = new Alert(Alert.AlertType.ERROR);
                     alert.setContentText("No game file found");
@@ -526,8 +539,12 @@ public class MainMenu {
                 }
                 // gamemode is loaded from the file in reloadGameState, the
                 // argument here is only a fallback.
-                Game.startGame(dummyBattlefield, speed, fast, 1, playerName,
-                        false, GameState.GAME_MODE.CLASSIC);
+                try {
+                    Game.startGame(dummyBattlefield, speed, fast, 1, playerName,
+                            false, GameState.GAME_MODE.CLASSIC);
+                } catch (IOException ex) {
+                    throw new RuntimeException(ex);
+                }
             }
         });
 

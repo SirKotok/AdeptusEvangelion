@@ -1,5 +1,7 @@
 package eva.evangelion.items.Weapon;
 
+import eva.evangelion.gameboard.SectorType;
+
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
@@ -11,11 +13,14 @@ public class AttackProfile implements Serializable {
     public int Stamina;
     public int AmmoCost = 0;
     public int Penetration = 0;
+    public int Strain = 0;
     public int AreaType = -1;
+    public SectorType replace = SectorType.Destroyed;
      // Area = -2 -> Line
      // Area = -1 -> Normal Attack
      // Area = 0+ -> Area Attack
     public int ATP;
+    public int multihit = 3;
     public int MinRange = 0;   // minimum distance (sectors) for a normal hit
     public int MaxRange = 1;   // maximum distance (sectors) for a normal hit
     public String name;
@@ -31,6 +36,25 @@ public class AttackProfile implements Serializable {
     /** True if `distance` (Chebyshev) is inside this profile's valid range. */
     public boolean isInRange(int distance) {
         return distance <= MaxRange;
+    }
+
+    public int getStrain() {
+        return Strain;
+    }
+
+    public void setStrain(int strain) {
+        Strain = strain;
+    }
+    public void addStrain(int strain) {
+        Strain += strain;
+    }
+
+    public int getStamina() {
+        return Stamina;
+    }
+
+    public void setStamina(int stamina) {
+        Stamina = stamina;
     }
 
     public int getMinRange() {

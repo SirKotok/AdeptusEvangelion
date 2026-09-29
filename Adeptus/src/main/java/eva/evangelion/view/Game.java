@@ -5,12 +5,13 @@ import eva.evangelion.gameboard.GameBoard;
 import eva.evangelion.gameboard.Sector;
 import eva.evangelion.items.Weapon.AttackProfile;
 import eva.evangelion.items.Weapon.Weapon;
+import eva.evangelion.state.GameStateStore;
 import eva.evangelion.units.battle.*;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.ObjectInputStream;
+
+import java.io.*;
+
 import eva.evangelion.items.Weapon.FieldItem;
 import eva.evangelion.state.actions.*;
 import eva.evangelion.view.UIElements.ScrollableContainer;
@@ -63,7 +64,6 @@ import javafx.scene.paint.Color;
 import javafx.stage.Stage;
 import kotlin.Triple;
 
-import java.io.IOException;
 import java.nio.file.*;
 import java.util.*;
 
@@ -76,6 +76,8 @@ public class Game {
     private GameState.GAME_MODE gameMode = GameState.GAME_MODE.CLASSIC;
     private boolean showAllUnits = false;
 
+    private volatile boolean closed = false;
+    private final List<Stage> childStages = new ArrayList<>();
 
     private final Stage stage;
     private GameBoard gameBoard;          // reference to the main board
@@ -128,7 +130,13 @@ public class Game {
     // ---- GameState persistence ----
     private static final String GAME_STATE_DIR = "Active";
     private static final String GAME_STATE_FILE = "gamestate.ser";
+    private Path stateDir;   // activegame or DMgame
+    private boolean dmSandbox;                   // true when working in DMgame
+    private String knownSessionId;                       // session of the state this client is running
+    private boolean sessionKnown = false;
+    private volatile boolean restarting = false;
 
+    private Path stateFile() { return GameStateStore.file(stateDir); }
     // ---- Units ----
     private final ObservableList<FieldUnit> UnitList = FXCollections.observableArrayList();
     private final Map<FieldUnit, Node> unitCircles = new HashMap<>();
@@ -141,7 +149,8 @@ public class Game {
     private MoveAction.MOVEMENTTYPE activeMoveMode = null;   // null = not in move mode
     private FieldUnit movementUnit = null;
 
-    private final Map<String, Color> visualisationLayer = new LinkedHashMap<>();
+    private final Map<String, Color> previewVisualisationLayer = new LinkedHashMap<>();
+    private final Map<String, Color> attackVisualisationLayer  = new LinkedHashMap<>();
 
     // ---- Gameplay ----
     private Queue queue;
@@ -158,14 +167,37 @@ public class Game {
     private boolean isProcessing = false;
     private Timeline processingTimeline = null;
 
+    /** True only while the initial batch of actions is being loaded. Forces fast processing. */
+    private boolean initialLoad;
+
+    /** Fast if the user chose fast actions, or if we are loading a game. */
+    private boolean isFast() {
+        return fastActions || initialLoad;
+    }
+
     // ============================================================
     //   CONSTRUCTORS
     // ============================================================
     private int startingplayernumber;
 
     public Game(Battlefield battlefield, String playerName, double speed, boolean fast,
-                int playernumber, boolean startnew, GameState.GAME_MODE gameMode) {
+                int playernumber, boolean startnew, GameState.GAME_MODE gameMode, boolean initialloading) throws IOException {
+        this(battlefield, playerName, speed, fast, playernumber, startnew, gameMode,
+                GameStateStore.ACTIVE_DIR, false, initialloading);
+    }
+
+
+    public Game(Battlefield battlefield, String playerName, double speed, boolean fast,
+                int playernumber, boolean startnew, GameState.GAME_MODE gameMode,
+                Path stateDir, boolean sandbox, boolean initialloading) throws IOException {
+        this.initialLoad = initialloading;
+        this.stateDir = stateDir;
+        this.dmSandbox = sandbox;
+        this.currentPlayer = (playerName != null && !playerName.isEmpty()) ? playerName : "Player";
+
         this.gameMode = (gameMode != null) ? gameMode : GameState.GAME_MODE.CLASSIC;
+        GameStateStore.ensureDirs();
+        GameStateStore.migrateLegacy(Paths.get(GAME_STATE_DIR, GAME_STATE_FILE));
 
         System.out.println("STARTING GAME WITH "+playernumber+" PLAYERNUMBER AND STARTNEW = "+startnew);
         this.battlefield = battlefield;
@@ -196,10 +228,10 @@ public class Game {
         Scene scene = new Scene(root, 1100, 800);
         stage = new Stage();
         stage.setScene(scene);
-        stage.setTitle("Adeptus Evangelion");
+        stage.setTitle(dmSandbox ? "[DM SANDBOX - not shared with players]" : "Adeptus Evangelion");
         stage.show();
 
-        this.currentPlayer = (playerName != null && !playerName.isEmpty()) ? playerName : "Player";
+
         if (this.currentPlayer.equalsIgnoreCase("DM")) {
             dmMode.set(true);
         }
@@ -219,7 +251,7 @@ public class Game {
         startGameStateWatcher();
         loadInitialGameState();
 
-
+        stage.setOnHidden(e -> shutdown());
 
     }
 
@@ -229,7 +261,7 @@ public class Game {
     // ============================================================
 
     private void startGameStateWatcher() {
-        Path dir = Paths.get(GAME_STATE_DIR);
+        Path dir = stateDir;
         if (!Files.exists(dir)) {
             try {
                 Files.createDirectories(dir);
@@ -251,32 +283,58 @@ public class Game {
     }
 
     private void loadInitialGameState() {
-        Path file = Paths.get(GAME_STATE_DIR, GAME_STATE_FILE);
+        Path file = stateFile();
         if (Files.exists(file)) {
-            reloadGameState();
+            try {
+                reloadGameState();
+            } finally {
+                initialLoad = false;        // back to the normal speed, even if loading failed
+            }
         } else {
             gamestate = new GameState();
+            knownSessionId = gamestate.getSessionId();
+            sessionKnown = true;
             saveGameState();
         }
-
-
     }
 
     private void reloadGameState() {
-        Path file = Paths.get(GAME_STATE_DIR, GAME_STATE_FILE);
+        Path file = stateFile();
         if (!Files.exists(file)) return;
         try {
             GameState newState = GameState.loadFromFile(file);
+            if (newState == null) return;                 // loadFromFile can return null
+
+            if (isSessionReplaced(newState)) {
+                onSessionReplacedByDM();
+                return;
+            }
+
+            if (!sessionKnown) {                          // first successful load: remember it
+                knownSessionId = newState.getSessionId();
+                sessionKnown = true;
+            }
+
             if (startingplayernumber == -1) {
                 startingplayernumber++;
-               for (Action act : newState.getActions()) {
-                   if (act instanceof createDMSetUpPopUpAction) startingplayernumber++;
-               }
+                for (Action act : newState.getActions()) {
+                    if (act instanceof createDMSetUpPopUpAction) startingplayernumber++;
+                }
             }
+
             if (newState != null) {
                 if (newState.getGameMode() != null) {
                     gameMode = newState.getGameMode();
                 }
+
+                if (hasDuplicateActionNumbers(newState)) {
+                    newState = CorruptedStateAttemptedFix(newState);
+                    gamestate = newState;
+                    saveGameState();          // overwrite the file with the repaired state
+                }
+
+
+
                 processNewState(newState);
             }
         } catch (IOException | ClassNotFoundException e) {
@@ -285,16 +343,32 @@ public class Game {
     }
 
     private void saveGameState() {
-        Path file = Paths.get(GAME_STATE_DIR, GAME_STATE_FILE);
         try {
-            gamestate.saveToFile(file);
+            GameStateStore.write(gamestate, stateDir);
         } catch (IOException e) {
             LogMessage("Failed to save GameState: " + e.getMessage());
         }
     }
 
+    /** Reads the file on disk, or null on any failure. */
+    private GameState loadStateQuietly() {
+        try {
+            return GameState.loadFromFile(stateFile());
+        } catch (IOException | ClassNotFoundException e) {
+            return null;
+        }
+    }
+
+    /** Freshest version of the game: the disk copy if readable, else what we hold in memory. */
+    private GameState currentStateSnapshot() {
+        GameState onDisk = loadStateQuietly();
+        return onDisk != null ? onDisk : gamestate;
+    }
+
+
     // ---- processNewState: collects new actions and starts sequential processing ----
     private void processNewState(GameState state) {
+        if (closed) return;
         int newCount = state.getActionCount();
         if (newCount > currentActionNumber) {
             List<Action> actions = state.getActions();
@@ -318,12 +392,12 @@ public class Game {
     // ============================================================
 
     private void startProcessing() {
-        if (isProcessing || pendingActions.isEmpty()) return;
+        if (closed || isProcessing || pendingActions.isEmpty()) return;
         isProcessing = true;
 
-        if (fastActions) {
+        if (isFast()) {
             List<Action> actionsCopy;
-            synchronized (pendingActions) {   // optional, but safe
+            synchronized (pendingActions) {
                 actionsCopy = new ArrayList<>(pendingActions);
                 pendingActions.clear();
             }
@@ -350,6 +424,7 @@ public class Game {
             cumulativeTime += delay;
 
             KeyFrame kf = new KeyFrame(Duration.seconds(cumulativeTime), e -> {
+                if (closed) return;
                 processAction(action);
                 LogMessage("Processed action: " + action);
             });
@@ -358,6 +433,7 @@ public class Game {
         }
 
         processingTimeline.setOnFinished(e -> {
+            if (closed) return;
             pendingActions.clear();
             isProcessing = false;
             processingTimeline = null;
@@ -373,7 +449,7 @@ public class Game {
 
     }
 
-    // ---- processAction: handles both MoveAction and DMChoosePlayerAction ----
+    // ---- processAction: handles all action processing
     private void processAction(Action action) {
         processActionCost(action);
         if (action instanceof MoveAction) {
@@ -417,164 +493,49 @@ public class Game {
         }
         refreshStatsContainers();
     }
-    private void setBackgroundForInventory(ScrollableContainer mainContainer) {
-        LogMessage("Adding evangelion picture as background");
-        Image backgroundImage = new Image(
-                Objects.requireNonNull(getClass().getResourceAsStream("/eva/evapicture.png"))
-        );
-        BackgroundImage background = new BackgroundImage(
-                backgroundImage,
-                BackgroundRepeat.NO_REPEAT,
-                BackgroundRepeat.NO_REPEAT,
-                BackgroundPosition.CENTER,
-                // cover = true so it scales to fill the VBox without tiling
-                new BackgroundSize(1.0, 1.0, true, true, false, true)
-        );
 
-        mainContainer.getContentBox().setBackground(new Background(background));
-    }
 
-    /**
-     * Resolves a single AttackAction:
-     *   1. Pulls the attacker, profile, and weapon off the action.
-     *   2. Consumes Ammo for the profile (if any).
-     *   3. Decides hit / miss by comparing {@code rolledValue} to Accuracy.
-     *   4. Applies damage to every hit sector, honouring Armor / Penetration.
-     *   5. Fires tech on-hit riders (Chain bleed, Superconductive penalty…).
-     *   6. Advances the queue.
-     *
-     * The numbers shown in the confirmation popup are the numbers used here:
-     * {@code rolledValue} is the d100, {@code rolledDamage} is the raw roll,
-     * and {@code finalDamage} is the raw roll after any Area/Line halving.
-     * If either damage field arrives as 0 (e.g. an action created outside the
-     * popup), we roll fresh so the pipeline never silently deals zero.
-     */
+
     private void processAttackAction(AttackAction attack) {
-    //TODO REMAKE THIS SO IT WORKS IDK
-        // ----- 1. Actor -----
-        FieldUnit actor = getUnitFromName(attack.getActor());
-        if (actor == null || !actor.isExists()) {
-            LogMessage("AttackAction failed: actor '" + attack.getActor() + "' not found.");
+
+        FieldUnit attacker = getUnitFromName(attack.getActor());
+        if (attacker == null || !attacker.isExists()) {
+            LogError("ERROR - attacker doesnt exist");
             return;
         }
+        //TODO FINSIH MAKING ATTACK ACTION WORK
 
-        AttackProfile profile = attack.getActionCombatProfile();
-        if (profile == null) {
-            LogMessage("AttackAction failed: no combat profile attached.");
-            return;
-        }
-
-        // ----- 2. Weapon (null for neutral / unarmed) -----
-        Weapon weapon = null;
-        if (attack.slotNumber >= 0 && actor.getSlots() != null
-                && attack.slotNumber < actor.getSlots().size()) {
-            Slot weaponSlot = actor.getSlots().get(attack.slotNumber);
-            if (weaponSlot.getItem() instanceof Weapon w) weapon = w;
-        }
-
-        // ----- 3. Consume Ammo -----
-        if (weapon != null && profile.AmmoCost > 0) {
-            int before = weapon.getAmmo();
-            weapon.setAmmo(Math.max(0, before - profile.AmmoCost));
-            LogMessage("Ammo consumed: " + profile.AmmoCost
-                    + " on " + weapon.getName()
-                    + " (" + before + " -> " + weapon.getAmmo() + ")");
-        }
-
-        // ----- 4. Hit / miss -----
-        int  roll     = attack.rolledValue;
-        int  accuracy = actor.getAccuracy();
-        boolean hasRoll = roll > 0;
-        boolean hit  = !hasRoll || roll <= accuracy;   // unrolled attack = trust the caller
-        boolean miss = !hit;
-
-        // ----- 5. Damage numbers -----
-        int rawDamage   = attack.rolledDamage;
-        int finalDamage = attack.finalDamage;
-        if (rawDamage   <= 0) rawDamage   = rollDamage(profile);
-        if (finalDamage <= 0) finalDamage = rawDamage;
-
-        String areaLabel = profile.AreaType == -2 ? "Line"
-                : profile.AreaType >= 0  ? "Area (" + profile.AreaType + ")"
-                : "—";
-
-        LogMessage(String.format(
-                "AttackAction: %s rolls %d vs %d (%s) with %s [%s] - raw %d, final %d, Pen %d, %s",
-                actor.getName(), roll, accuracy, hit ? "HIT" : "MISS",
-                weapon != null ? weapon.getName() : "Unarmed",
-                profile.name, rawDamage, finalDamage, profile.Penetration, areaLabel));
-
-        // ----- 6. Apply to every hit sector -----
-        for (AttackAction.Hit h : attack.hitPositions) {
-
-            // Visual: red arrow on hit, grey on miss — always drawn so players
-            // can see where the attack went even when it whiffed.
-            DrawArrow(hit ? Color.DARKRED : Color.GRAY,
-                    actor.getX(), actor.getY(), h.x, h.y,
-                    Arrow.ArrowType.ACTION);
-
-            FieldUnit target = getUnitAt(h.x, h.y);
-            if (target == null) {
-                LogMessage("  " + CordsToText(h.x, h.y) + " is empty - no damage.");
+        for (AttackAction.Hit h : attack.getHitPositions()) {
+            int hx = attacker.getX() + h.deltax;
+            int hy = attacker.getY() + h.deltay;
+            if (hx < 0 || hx >= battlefield.sizeX || hy < 0 || hy >= battlefield.sizeY) {
+                LogMessage("hit outside of board");
                 continue;
             }
-            if (target == actor) {
-                LogMessage("  skipping self at " + CordsToText(h.x, h.y));
+            FieldUnit target = getUnitAt(hx, hy);
+            if (target == null || !target.isExists()) {
+                LogMessage("hit has no target");
                 continue;
             }
+            String targetNAme = target.getName();
+            QueuePosition playerReaction = QueuePosition.createReactionTurn(
+                    targetNAme,
+                    ReactionType.PLAYER_SETUP,
+                    "Defence against an attack from "+attacker.getName()+" that will hit with damage ", attack.getActionNumber()
+            );
+            playerReaction.setSkippable(false);
+            LogMessage("current starting players = "+startingplayernumber);
+            queue.addPosition(playerReaction,startingplayernumber-1);
+            LogMessage("Added PLAYER_SETUP reaction turn for " + targetNAme+" at position "+queue.getNUMPOSof(playerReaction));
 
-            // Non-area miss: nothing lands.
-            if (miss && profile.AreaType == -1) {
-                LogMessage("  " + target.getName() + ": missed, no damage.");
-                continue;
-            }
-
-            // Area/Line miss uses the halved value the popup already stored.
-            //TODO PENETRATION AND SHIT int dealt = applyAttackDamage(target, finalDamage, profile);
-
-          //  LogMessage("  " + target.getName() + " takes " + dealt
-          //          + " damage (toughness now "
-           //         + target.getToughness() + "/" + target.getMaxToughness() + ").");
         }
-
-        // ----- 7. Queue -----
         activateQueue(attack);
         setActorToNext(attack);
     }
 
-    /**
-     * Rolls a profile's damage pool: {@code Dice × dDicepower + Power}.
-     * Used only as a fallback when an action arrives without a pre-rolled value
-     * (e.g. an action authored outside the confirmation popup).
-     */
-    private int rollDamage(AttackProfile profile) {
-        if (profile == null || profile.Dice <= 0 || profile.Dicepower <= 0) return 0;
-        int total = profile.Power;
-        for (int i = 0; i < profile.Dice; i++) {
-            total += 1 + (int) (Math.random() * profile.Dicepower);
-        }
-        return total;
-    }
 
-    /**
-     * Applies one instance of damage to one target:
-     *   • subtract Armor (reduced by the profile's Penetration)
-     *   • push the remainder into the target's Toughness
-     *   • fire tech-specific on-hit riders carried by the weapon
-     *
-     * @return  the amount of damage that actually landed on Toughness.
-     */
-    private int applyAttackDamage(FieldUnit target, int damage, int penetration) {
 
-        int armor          = target.getArmor();
-        int pen            = penetration;
-        int effectiveArmor = Math.max(0, armor - pen);
-        int afterArmor     = Math.max(0, damage - effectiveArmor);
 
-        target.DealToughnessDamage(afterArmor);
-
-        return afterArmor;
-    }
 
     /**
      * Degrees of Success for a given roll vs the attacker's Accuracy.
@@ -610,7 +571,7 @@ public class Game {
         }
         actor.setX(newX);
         actor.setY(newY);
-        double visualDuration = fastActions ? 0 : movement.getTime() / actionSpeed;
+        double visualDuration = isFast() ? 0.01 : movement.getTime() / actionSpeed;
         processMoveVisuals(actor, oldX, oldY, newX, newY, visualDuration);
         LogMessage("Moved " + actor.getName() + " from (" + oldX + "," + oldY + ") to (" + newX + "," + newY + ")");
         activateQueue(movement);
@@ -621,10 +582,10 @@ public class Game {
         FieldUnit actor = getUnitFromName(action.getActor());
         if (actor != null && actor.isExists()) {
         actor.useATP(action.ATPCost);
-        if (actor.getATP() < 0) LogMessage("ERROR = ATP LESS THEN 0 AT "+action.getActionNumber());
+        if (actor.getATP() < 0) LogError("ERROR = ATP LESS THEN 0 AT "+action.getActionNumber());
         actor.useStamina(action.staminaCost);
-        if (actor.getStamina() < 0) LogMessage("ERROR = STAMINA LESS THEN 0 AT "+action.getActionNumber());
-        if (actor.usedTactical() && action.isTactical()) LogMessage("ERROR = TACTICAL ACTION USED WHEN UNIT HAS NO TACTICAL LEFT AT "+action.getActionNumber());
+        if (actor.getStamina() < 0) LogError("ERROR = STAMINA LESS THEN 0 AT "+action.getActionNumber());
+        if (actor.usedTactical() && action.isTactical()) LogError("ERROR = TACTICAL ACTION USED WHEN UNIT HAS NO TACTICAL LEFT AT "+action.getActionNumber());
         actor.useTactical(action.isTactical());
     } else LogMessage("Action has no actor at "+action.getActionNumber());
     }
@@ -691,12 +652,14 @@ public class Game {
         unit.setStamina(unit.getMaxStamina());
         unit.setTurnDone(false);
         unit.setATP(unit.getMaxATP());
+        unit.setUsedTactical(false);
     }
 
     private void processEndRound() {
         for (FieldUnit unit : UnitList) {
             unit.ClearEffects(Effect.EffectEnd.ROUND_END);
             unit.setUsedGuard(false);
+
         }
         CurrentTurn = 1;
         CurrentRound++;
@@ -758,7 +721,7 @@ public class Game {
 
         FieldUnit actor = getUnitFromName(action.getActor());
         if (actor == null || !actor.isExists()) {
-            LogMessage("ItemTransferActionFailed since Actor Doesnt Exist" + action.getActor());
+            LogError("ItemTransferActionFailed since Actor Doesnt Exist" + action.getActor());
             return;
         }
 
@@ -768,7 +731,7 @@ public class Game {
             int from = action.getSlotFrom();
             int to = action.getSlotTo();
             if (evaslots.size() < from || evaslots.size() < to) {
-                LogMessage("ItemTransferActionFailed - Impossible Slots Error");
+                LogError("ItemTransferActionFailed - Impossible Slots Error");
                 activateQueue(action);
                 setActorToNext(action);
                 return;
@@ -780,8 +743,8 @@ public class Game {
                     evaslots.get(from).setItem(toItem);
                     evaslots.get(to).setItem(fromItem);
                     LogMessage("Items switched between from slot "+from+" to "+to);
-                } else LogMessage("ItemTransferAction Failed since SLOT CANT FIT ITEM");
-            } else LogMessage("ItemTransferAction Failed since Item being transferred doesn't exist");
+                } else LogError("ItemTransferAction Failed since SLOT CANT FIT ITEM");
+            } else LogError("ItemTransferAction Failed since Item being transferred doesn't exist");
 
             activateQueue(action);
             setActorToNext(action);
@@ -802,12 +765,12 @@ public class Game {
         }
 
         switch (action.getTransferType()){
-            case INVENTORY -> LogMessage("ERROR, INVENTORY ACTION SPOTTED AT IMPOSSIBLE PLACE");
+            case INVENTORY -> LogError("ERROR, INVENTORY ACTION SPOTTED AT IMPOSSIBLE PLACE");
             case UNIT2BOARD -> {
                 List<Slot> evaslots = ((Evangelion) actor.getUnit()).getSlots();
                 int from = action.getSlotFrom();
                 if (evaslots.get(from).getItem() == null) {
-                    LogMessage("ERROR, PICKING UP ITEM TO OCCUPIED SLOT");
+                    LogError("ERROR, PICKING UP ITEM TO OCCUPIED SLOT");
                 }
                 Item PutDown = evaslots.get(from).getItem();
                 processDropVisuals(actorX, actorY, itemX, itemY);
@@ -820,7 +783,7 @@ public class Game {
                 List<Slot> evaslots = ((Evangelion) actor.getUnit()).getSlots();
                 int to = action.getSlotTo();
                 if (evaslots.get(to).getItem() != null) {
-                    LogMessage("ERROR, PICKING UP ITEM TO OCCUPIED SLOT");
+                    LogError("ERROR, PICKING UP ITEM TO OCCUPIED SLOT");
                 }
                 processPickUpVisuals(itemX, itemY, actorX, actorY);
                 evaslots.get(to).setItem(item1);
@@ -924,7 +887,7 @@ public class Game {
 
         FieldUnit unit = createFieldUnit(name, action.getUnit(), x, y, action.getTeam());
 
-        double visualDuration = fastActions ? 0.1 : action.getTime() / actionSpeed;
+        double visualDuration = isFast() ? 0.01 : action.getTime() / actionSpeed;
         animateCreateUnit(unit, visualDuration);
 
         LogMessage("DMCreateUnitAction: Created unit '" + name + "' at (" + x + "," + y + ").");
@@ -942,7 +905,7 @@ public class Game {
             return;
         }
 
-        double visualDuration = fastActions ? 0.1 : action.getTime() / actionSpeed;
+        double visualDuration = isFast() ? 0.01 : action.getTime() / actionSpeed;
         animateDestroyUnit(unitToDelete, visualDuration, () -> {
             removeFieldUnit(unitToDelete);
             LogMessage("DMDeleteUnitAction: Deleted unit '" + unitToDelete.getName() + "' at (" + x + "," + y + ").");
@@ -953,24 +916,25 @@ public class Game {
 
     private void processDMChoosePlayerAction(DMChoosePlayerAction action) {
         QueuePosition current = queue.currentPosition();
-        if (current != null) {
-            activateQueue(action);
-            current.setUnitID("DM_Choose");
-            LogMessage("Renamed ID to "+current.getUnitID());
-            String chosen = action.getChosenPlayer();
-            FieldUnit chosenUnit = getUnitFromName(chosen);
-            if (chosenUnit != null && chosenUnit.isTurnDone()) {
-                LogMessage("Changed turn done to false for "+chosen);
-                chosenUnit.setTurnDone(false);   // NEW
-            }
-            QueuePosition nextPos = new QueuePosition(chosen, false);
-            nextPos.setActionNumber(-1);
-            LogMessage("Adding queue position for " + nextPos.getUnitID() + " at DMPlayerAction");
-            queue.addPosition(nextPos, 1);
-            CurrentTurn++;
-        } else {
-            LogMessage("DMChoosePlayerAction failed: No current queue position.");
+        if (current == null || current.isReaction()) {
+            LogError("DMChoosePlayerAction ignored: current position is a reaction or missing.");
+            return;
         }
+        activateQueue(action);
+        current.setUnitID("DM_Choose");
+        LogMessage("Renamed ID to "+current.getUnitID());
+
+        String chosen = action.getChosenPlayer();
+        FieldUnit chosenUnit = getUnitFromName(chosen);
+        if (chosenUnit != null && chosenUnit.isTurnDone()) {
+            LogMessage("Changed turn done to false for "+chosen);
+            chosenUnit.setTurnDone(false);   // NEW
+        }
+        QueuePosition nextPos = new QueuePosition(chosen, false);
+        nextPos.setActionNumber(-1);
+        LogMessage("Adding queue position for " + nextPos.getUnitID() + " at DMPlayerAction");
+        queue.addPosition(nextPos, 1);
+        CurrentTurn++;
     }
 
 
@@ -1284,9 +1248,20 @@ public class Game {
     }
 
     private void SendAction(Action action) {
+        // A client that hasn't noticed a replace/revert yet must not overwrite the new game with its old state.
+        GameState onDisk = loadStateQuietly();
+        if (isSessionReplaced(onDisk)) {
+            onSessionReplacedByDM();
+            return;
+        }
+
+        int next = gamestate.getActions().size() + 1;
+        if (action.getActionNumber() != next) {
+            setActionNumber(action, next);       // reflection helper from before
+        }
         gamestate.addAction(action);
         saveGameState();
-        LogMessage("Action sent: " + action);
+        LogMessage("Action sent: " + action + " as #" + next);
     }
 
     // ============================================================
@@ -1357,10 +1332,20 @@ public class Game {
      * MaxRange. Sectors below MinRange still produce an attack, but log a
      * "too close" warning so the player knows a penalty will apply.
      */
-    private void handleAttackSectorClick(int x, int y) {
 
-        // Click outside the highlighted zone: no-op while in attack mode.
-        if (!isInVisualisationLayer(x, y)) return;
+    /** One aimed hit. x/y is the resolved target (for lines: the end of the line). dirX/dirY are only used by lines. */
+    private record PendingHit(int x, int y, int dirX, int dirY) {}
+
+    /** Oldest first. Its size never exceeds the profile's multihit. */
+    private final LinkedList<PendingHit> pendingAttackHits = new LinkedList<>();
+
+    private static final Color ATTACK_CENTER_TINT = Color.rgb(255, 0, 0);
+    private static final Color ATTACK_AREA_TINT   = Color.rgb(255, 140, 0);
+    private static final Color ATTACK_LINE_TINT   = Color.rgb(200, 0, 200);
+
+    private void handleAttackSectorClick(int x, int y) {
+        // Only sectors in the highlighted zone are clickable (for lines the zone is only straight lines).
+        if (!isInPreviewVisualisationLayer(x, y)) return;
 
         FieldUnit target = getUnitAt(x, y);
         if (target == attackUnit) {
@@ -1370,64 +1355,152 @@ public class Game {
 
         int dx = x - attackUnit.getX();
         int dy = y - attackUnit.getY();
-        int dist = Math.max(Math.abs(dx), Math.abs(dy));   // Chebyshev
+        int dist = Math.max(Math.abs(dx), Math.abs(dy));
 
-        AttackProfile combatProfile = modifyCombatProfile(activeAttackProfile);
+        AttackProfile combatProfile = copyProfileAndApplyEffects(activeAttackProfile);
+        boolean isLine = combatProfile.AreaType == -2;
 
-        int maxRange = combatProfile.MaxRange;
-        if (dist > maxRange) {
-            LocalMessage("Sector out of range (" + dist + " > max " + maxRange + ").");
+        if (dist > combatProfile.MaxRange) {
+            LocalMessage("Sector out of range (" + dist + " > max " + combatProfile.MaxRange + ").");
             return;
         }
-        if (isAttackBelowMinRange(combatProfile, dist)) {
-            LocalMessage("Warning: sector is inside min range (" + dist
-                    + " < " + combatProfile.MinRange
+
+        // Lines always travel to max range, so "too close" only matters for other attacks.
+        if (!isLine && isAttackBelowMinRange(combatProfile, dist)) {
+            LocalMessage("Warning: sector is inside min range (" + dist + " < " + combatProfile.MinRange
                     + "). Attack will suffer the too-close penalty.");
         }
 
+        // ---- Resolve what this click actually targets ----
+        PendingHit hit;
+        if (isLine) {
+            int dirX = Integer.signum(dx);
+            int dirY = Integer.signum(dy);
+            List<int[]> line = getLineSectors(attackUnit.getX(), attackUnit.getY(), dirX, dirY, combatProfile.MaxRange);
+            if (line.isEmpty()) return;
+            int[] end = line.get(line.size() - 1);
+            hit = new PendingHit(end[0], end[1], dirX, dirY);
+        } else {
+            hit = new PendingHit(x, y, 0, 0);
+        }
 
+        // ---- Multihit: the newest click replaces the oldest ----
+        int maxHits = Math.max(1, combatProfile.multihit);
+        pendingAttackHits.addLast(hit);
+        while (pendingAttackHits.size() > maxHits) {
+            pendingAttackHits.removeFirst();
+        }
 
-        // Preview arrow on the main board
+        // ---- Redraw arrows + highlights from scratch so they always match the hit list ----
+        redrawAttackPreview(combatProfile);
+
+        // ---- Build the pending AttackAction ----
+        AttackAction atk = new AttackAction(currentActionNumber+1, attackUnit.getName());
+        for (PendingHit h : pendingAttackHits) {
+            atk.addHit(h.x() - attackUnit.getX(), h.y() - attackUnit.getY());
+        }
+        atk.slotNumber = (selectedAttackWeaponSlot != null)
+                ? attackUnit.getSlots().indexOf(selectedAttackWeaponSlot) : -1;
+        atk.actionCombatProfile = combatProfile;
+        atk.ATPCost = combatProfile.ATP;
+        atk.staminaCost = combatProfile.Stamina;
+        confirmAction = atk;
+
+        StringBuilder desc = new StringBuilder(attackUnit.getName()).append(" → ");
+        int i = 0;
+        for (PendingHit h : pendingAttackHits) {
+            if (i++ > 0) desc.append(", ");
+            desc.append(CordsToText(h.x(), h.y()));
+            FieldUnit u = getUnitAt(h.x(), h.y());
+            if (u != null) desc.append(" (").append(u.getName()).append(")");
+        }
+        if (isLine) desc.append(" [Line]");
+        createConfirmButton(atk, Color.DARKRED, desc.toString());
+
+        LogMessage("Attack pending: " + pendingAttackHits.size() + "/" + maxHits
+                + " hit(s). Click Confirm to finalise" + (pendingAttackHits.size() < maxHits
+                ? ", or click more sectors." : "."));
+    }
+
+    /** Rebuilds arrows (attack layer) from pendingAttackHits. */
+    private void redrawAttackPreview(AttackProfile profile) {
+        // Arrows
         clearPreviewArrows();
         double sx = attackUnit.getX() * 20 + 10;
         double sy = attackUnit.getY() * 20 + 10;
-        double ex = x * 20 + 10;
-        double ey = y * 20 + 10;
-        Arrow preview = new Arrow(boardContainer, Color.RED, sx, sy, ex, ey,
-                Arrow.ArrowType.PREVIEW);
-        arrows.add(preview);
+        for (PendingHit h : pendingAttackHits) {
+            double ex = h.x() * 20 + 10;
+            double ey = h.y() * 20 + 10;
+            arrows.add(new Arrow(boardContainer, Color.RED, sx, sy, ex, ey, Arrow.ArrowType.PREVIEW));
+        }
 
-        // Build the pending AttackAction (works for empty or occupied sectors)
-        AttackAction atk = new AttackAction(currentActionNumber, attackUnit.getName());
-        atk.addHit(x, y);
-        atk.slotNumber = (selectedAttackWeaponSlot != null) ? attackUnit.getSlots().indexOf(selectedAttackWeaponSlot) : -1;
+        // Highlights (attack layer sits on top of the range zone in the preview layer)
+        attackVisualisationLayer.clear();
+
+        if (profile.AreaType == -2) {
+            // Line: every sector along the line, end of the line in the strong color
+            for (PendingHit h : pendingAttackHits) {
+                for (int[] s : getLineSectors(attackUnit.getX(), attackUnit.getY(),
+                        h.dirX(), h.dirY(), profile.MaxRange)) {
+                    addToAttackVisualisationLayer(s[0], s[1], ATTACK_LINE_TINT);
+                }
+            }
+            for (PendingHit h : pendingAttackHits) {
+                addToAttackVisualisationLayer(h.x(), h.y(), ATTACK_CENTER_TINT);
+            }
+        } else if (profile.AreaType >= 0) {
+            // Area: (2*area+1)^2 square around every hit. Area tint first, all centers last,
+            // so an overlapping area from another hit can't paint over a center.
+            int r = profile.AreaType;
+            for (PendingHit h : pendingAttackHits) {
+                for (int ax = -r; ax <= r; ax++) {
+                    for (int ay = -r; ay <= r; ay++) {
+                        int tx = h.x() + ax;
+                        int ty = h.y() + ay;
+                        if (!isOnBoard(tx, ty)) continue;
+                        addToAttackVisualisationLayer(tx, ty, ATTACK_AREA_TINT);
+                    }
+                }
+            }
+            for (PendingHit h : pendingAttackHits) {
+                addToAttackVisualisationLayer(h.x(), h.y(), ATTACK_CENTER_TINT);
+            }
+        }
+        // AreaType == -1 (normal attack): the arrow is enough, no extra highlight.
+
+        applyVisualisation();
+    }
+
+    private boolean isOnBoard(int x, int y) {
+        return x >= 0 && x < battlefield.sizeX && y >= 0 && y < battlefield.sizeY;
+    }
+
+    /**
+     * Sectors of a line starting next to (ax, ay) and going in (dirX, dirY) for up to maxRange sectors.
+     * Stops at the board edge, so the last element is the real end of the line.
+     */
+    private List<int[]> getLineSectors(int ax, int ay, int dirX, int dirY, int maxRange) {
+        List<int[]> result = new ArrayList<>();
+        if (dirX == 0 && dirY == 0) return result;
+        for (int i = 1; i <= maxRange; i++) {
+            int tx = ax + dirX * i;
+            int ty = ay + dirY * i;
+            if (!isOnBoard(tx, ty)) break;
+            result.add(new int[]{tx, ty});
+        }
 
 
-
-        atk.actionCombatProfile = combatProfile;
-        atk.ATPCost        = combatProfile.ATP;
-        atk.staminaCost    = combatProfile.Stamina;
-
-        confirmAction = atk;
-
-        String desc = attackUnit.getName() + " → " + CordsToText(x, y);
-        if (target != null) desc += " (" + target.getName() + ")";
-        createConfirmButton(atk, Color.DARKRED, desc);
-
-        LocalMessage(target != null
-                ? "Attack pending on " + target.getName() + ". Click Confirm to finalise."
-                : "Attack pending on empty sector " + CordsToText(x, y) + ". Click Confirm to finalise.");
+        return result;
     }
 
 
     //Weapon profile handles all things that relate to the weapon but do not depend on the roll results. Creating combat profile will copy it to
     //create a version thats influenced by Evangelion's effects and Predicate options
-    private AttackProfile modifyCombatProfile(
+    private AttackProfile copyProfileAndApplyEffects(
             AttackProfile weaponProfile) {
      return weaponProfile.copy();
     }
-    private AttackProfile turnIntoCombatProfile(
-            AttackProfile weaponProfile, FieldUnit unit) {
+    private AttackProfile turnIntoCombatProfile(AttackProfile weaponProfile, FieldUnit unit) {
         weaponProfile.Power+=unit.getAttackStrength();
         return weaponProfile;
     }
@@ -1440,7 +1513,7 @@ public class Game {
      * Clicking outside the highlighted zone is a no-op.
      */
     private void handleMovementSectorClick(int x, int y) {
-        if (!isInVisualisationLayer(x, y)) return;   // ignore non-highlighted sectors
+        if (!isInPreviewVisualisationLayer(x, y)) return;   // ignore non-highlighted sectors
 
         int dx = x - movementUnit.getX();
         int dy = y - movementUnit.getY();
@@ -1456,7 +1529,7 @@ public class Game {
                 Arrow.ArrowType.PREVIEW);
         arrows.add(preview);
 
-        MoveAction mv = new MoveAction(currentActionNumber, movementUnit.getName(), dx, dy);
+        MoveAction mv = new MoveAction(currentActionNumber+1, movementUnit.getName(), dx, dy);
         confirmAction = mv;
         createConfirmButton(confirmAction, Color.DARKORANGE,
                 movementUnit.getName() + " → " + CordsToText(x, y));
@@ -1485,30 +1558,10 @@ public class Game {
         clearSecondaryStats();
 
         if (selectedUnit == null) {
-            LocalMessage("No unit selected. Click on a unit to select it.");
+            LogMessage("No unit selected. Click on a unit to select it.");
             return;
         }
 
-        QueuePosition current = queue.currentPosition();
-        if (current == null) {
-            LocalMessage("No current turn in queue.");
-            return;
-        }
-        String currentUnitID = current.getUnitID();
-        if (!currentPlayer.equalsIgnoreCase("DM") && !currentUnitID.equals(currentPlayer)) {
-            LocalMessage("It's not your turn. Current turn: " + currentUnitID);
-            return;
-        }
-        if (!currentPlayer.equalsIgnoreCase("DM") && !selectedUnit.getName().equals(currentPlayer)) {
-            LocalMessage("You can only move units that belong to you.");
-            return;
-        }
-
-        confirmAction = new MoveAction(currentActionNumber, selectedUnit.getName(),
-                x - selectedUnit.getX(), y - selectedUnit.getY());
-
-        createConfirmButton(confirmAction, Color.DARKORANGE, "Move to (" + x + "," + y + ")");
-        LocalMessage("Move pending. Click Confirm to send.");
     }
 
 
@@ -1556,7 +1609,7 @@ public class Game {
             return;
         }
 
-        Stage popupStage = new Stage();
+        Stage popupStage = newChildStage();
         popupStage.initModality(Modality.APPLICATION_MODAL);
         popupStage.setTitle("Confirm Action");
         popupStage.initStyle(StageStyle.TRANSPARENT);
@@ -1623,11 +1676,16 @@ public class Game {
 
     private void showAttackConfirmPopup(AttackAction action, AttackProfile profile,
                                         Weapon weapon, Slot slot) {
-        if (profile == null) { LocalMessage("No attack profile selected."); return; }
+
+        //Check to see if it cane be created
+
+        if (profile == null) { LogMessage("No attack profile selected."); return; }
         FieldUnit attacker = getUnitFromName(action.getActor());
         if (attacker == null || !attacker.isExists()) return;
 
-        Stage popupStage = new Stage();
+        //POP UP BUILDER
+
+        Stage popupStage = newChildStage();
         popupStage.initModality(Modality.APPLICATION_MODAL);
         popupStage.setTitle("Confirm Attack");
         popupStage.initStyle(StageStyle.TRANSPARENT);
@@ -1653,11 +1711,14 @@ public class Game {
         StringBuilder targetText = new StringBuilder();
         for (int i = 0; i < action.hitPositions.size(); i++) {
             AttackAction.Hit h = action.hitPositions.get(i);
+            int hx = attacker.getX() + h.deltax;
+            int hy = attacker.getY() + h.deltay;
             if (i > 0) targetText.append(", ");
-            FieldUnit hU = getUnitAt(h.x, h.y);
-            if (hU != null) targetText.append(hU.getName()).append("  ").append(CordsToText(h.x, h.y));
-            else            targetText.append(CordsToText(h.x, h.y));
+            FieldUnit hU = getUnitAt(hx, hy);
+            if (hU != null) targetText.append(hU.getName()).append("  ").append(CordsToText(hx, hy));
+            else            targetText.append(CordsToText(hx, hy));
         }
+
         Label targetLabel = new Label("Target: " + targetText);
         targetLabel.setStyle("-fx-font-size: 13px; -fx-text-fill: #333;");
 
@@ -1734,62 +1795,17 @@ public class Game {
         cancelBtn.setDangerStyle();
         cancelBtn.setOnAction(e -> popupStage.close());
 
-        final int[] rolledAttack   = {0};
-        final int[] rolledDamage   = {0};
-        final int[] finalDamage    = {0};
-        final int[] techBonusOut   = {0};
+
 
         rollBtn.setOnAction(e -> {
-            // -- Attack roll --
-            int roll = 1 + (int) (Math.random() * 100);
-            rolledAttack[0] = roll;
-            int accuracy = attacker.getAccuracy();
-            boolean hit = roll <= accuracy;
 
-            accuracyResult.setText(roll + (hit ? "  <  " : "  >  ") + accuracy);
-            accuracyResult.setStyle("-fx-font-size: 20px; -fx-font-weight: bold; -fx-text-fill: "
-                    + (hit ? "#2e7d32" : "#b00020") + ";");
-
-            // -- Damage roll --
-            int dmg = 0;
-            for (int i = 0; i < profile.Dice; i++) {
-                dmg += 1 + (int) (Math.random() * profile.Dicepower);
-            }
-            dmg += profile.Power;
-
-            // -- Tech-driven bonus damage (currently only Gauss) --
-            int techBonus = computeTechDamageBonus(weapon, roll, accuracy, hit);
-            techBonusOut[0] = techBonus;
-            rolledDamage[0] = dmg + techBonus;
-
-            // -- Area / Line half-damage on miss --
-            int displayed = rolledDamage[0];
-            if (!hit && profile.AreaType != -1) {
-                int halved = (int) Math.ceil(displayed / 2.0);
-                finalDamage[0] = halved;
-                String areaName = (profile.AreaType == -2) ? "Line" : "Area";
-                areaNote.setText(areaName + " weapons deal half-damage on miss:   "
-                        + displayed + "  →  " + halved);
-                damageResult.setText(halved + "  (+" + profile.Penetration + " Pen)");
-            } else {
-                finalDamage[0] = displayed;
-                damageResult.setText(displayed + "  (+" + profile.Penetration + " Pen)"
-                        + (techBonus > 0 ? "   [tech +" + techBonus + "]" : ""));
-            }
-            damageResult.setStyle("-fx-font-size: 20px; -fx-font-weight: bold; -fx-text-fill: "
-                    + (hit ? "#2e7d32" : "#555") + ";");
-
-            // -- Lock the popup --
-            rollBtn.setDisable(true);
-            cancelBtn.setDisable(true);
-            proceedBtn.setDisable(false);
         });
 
         proceedBtn.setOnAction(e -> {
-            action.rolledValue    = rolledAttack[0];
-            action.rolledDamage   = rolledDamage[0];
-            action.finalDamage    = finalDamage[0];
-            action.techDamageBonus = techBonusOut[0];
+          //  action.rolledValue    = rolledAttack[0];
+          //  action.rolledDamage   = rolledDamage[0];
+          //  action.finalDamage    = finalDamage[0];
+          //  action.techDamageBonus = techBonusOut[0];
             SendAction(action);
             clearAttackVisualization();
             confirmAction = null;
@@ -1828,42 +1844,33 @@ public class Game {
         StringBuilder sb = new StringBuilder();
         sb.append(p.Dice).append("d").append(p.Dicepower);
         if (p.Power != 0) sb.append(p.Power > 0 ? "+" : "").append(p.Power);
-        sb.append("   |   Pen ").append(p.Penetration);
+        sb.append(" | Penetration: ").append(p.Penetration);
 
-        if (p.AreaType == -2)     sb.append("   |   Line");
-        else if (p.AreaType >= 0) sb.append("   |   Area ").append(p.AreaType);
+        if (p.AreaType == -2)     sb.append(" | Line");
+        else if (p.AreaType >= 0) sb.append(" | Area ").append(p.AreaType);
 
-        if (p.Ranged) sb.append("   |   Rng ").append(p.MinRange).append("-").append(p.MaxRange);
-        else if (p.MaxRange > 1) sb.append("   |   Reach ").append(p.MaxRange);
+        if (p.Ranged) sb.append(" | Range ").append(p.MinRange).append("-").append(p.MaxRange);
+        else if (p.MaxRange > 1) sb.append(" | Reach ").append(p.MaxRange);
+
+
 
         if (weapon != null) {
             switch (weapon.getCurrentTech()) {
-                case GAUSS -> sb.append("   |   +d (Gauss)");
+                case GAUSS -> sb.append(" | +d (Gauss)");
                 case POLYTHERMIC -> { if (weapon.isActiveTech()) sb.append("   |   OVERHEAT"); }
-                case SUPERCONDUCTIVE -> sb.append("   |   even/odd → -10");
-                case N2SHELL  -> { if (weapon.isActiveTech()) sb.append("   |   N2 Active"); }
+                case N2SHELL  -> { if (weapon.isActiveTech()) sb.append("   |   N2 Shell Active"); }
                 case MASER    -> { if (weapon.isActiveTech()) sb.append("   |   Maser Active"); }
                 default -> { }
             }
         }
+
         return sb.toString();
     }
 
-    /**
-     * Tech-driven flat damage bonus applied on top of the rolled profile damage.
-     * Only Gauss is currently modelled: +1 damage per DoS, capped at +3.
-     * Extend this switch as more techs are implemented.
-     */
-    private int computeTechDamageBonus(Weapon weapon, int roll, int accuracy, boolean hit) {
-        if (weapon == null || !hit) return 0;
-        switch (weapon.getCurrentTech()) {
-            case GAUSS -> {
-                int dos = Math.max(0, (accuracy - roll) / 10);
-                return Math.min(3, dos);
-            }
-            default -> { return 0; }
-        }
-    }
+
+
+
+
 
     // ============================================================
 //   ATTACK CHOOSER
@@ -1892,8 +1899,7 @@ public class Game {
      */
     private boolean hasActivatableTech(Weapon weapon) {
         if (weapon == null) return false;
-        return weapon.getCurrentTech() == Weapon.Tech.N2SHELL
-                || weapon.getCurrentTech() == Weapon.Tech.MASER;
+        return weapon.hasActivatableTech();
     }
 
     private void rebuildWeaponChooser() {
@@ -2141,9 +2147,12 @@ public class Game {
                     + ", have " + selectedAttackWeapon.getAmmo() + ")."); return;
         }
 
-        clearMovementVisualization();
-        clearVisualisationLayer();
+        activeMoveMode = null;
+        movementUnit = null;
+        clearPreviewVisualisationLayer();
         clearPreviewArrows();
+        pendingAttackHits.clear();
+        attackVisualisationLayer.clear();
 
         attackModeActive    = true;
         activeAttackProfile = profile;
@@ -2161,14 +2170,18 @@ public class Game {
         for (int dx = -maxRange; dx <= maxRange; dx++) {
             for (int dy = -maxRange; dy <= maxRange; dy++) {
                 if (dx == 0 && dy == 0) continue;
-                int dist = Math.max(Math.abs(dx), Math.abs(dy));   // Chebyshev
+                int dist = Math.max(Math.abs(dx), Math.abs(dy));
                 if (dist > maxRange) continue;
+
+                boolean isLine = profile.AreaType == -2;
+                if (isLine && !(dx == 0 || dy == 0 || Math.abs(dx) == Math.abs(dy))) continue;
+
                 int tx = unit.getX() + dx;
                 int ty = unit.getY() + dy;
-                if (tx < 0 || tx >= battlefield.sizeX || ty < 0 || ty >= battlefield.sizeY) continue;
+                if (!isOnBoard(tx, ty)) continue;
 
-                Color tint = isAttackBelowMinRange(profile, dist) ? tooCloseTint : attackTint;
-                addToVisualisationLayer(tx, ty, tint);
+                Color tint = (!isLine && isAttackBelowMinRange(profile, dist)) ? tooCloseTint : attackTint;
+                addToPreviewVisualisationLayer(tx, ty, tint);
             }
         }
 
@@ -2194,8 +2207,10 @@ public class Game {
         attackModeActive = false;
         activeAttackProfile = null;
         attackUnit = null;
+        pendingAttackHits.clear();
+        attackVisualisationLayer.clear();
         clearPreviewArrows();
-        clearVisualisationLayer();
+        clearPreviewVisualisationLayer();
     }
 
 
@@ -2250,7 +2265,7 @@ public class Game {
         }
 
         // Fresh layer
-        clearVisualisationLayer();
+        clearPreviewVisualisationLayer();
         activeMoveMode = mode;
         movementUnit = unit;
 
@@ -2288,7 +2303,7 @@ public class Game {
                 }
 
                 Color tint = darkenForTier(baseTint, tier);
-                addToVisualisationLayer(tx, ty, tint);
+                addToPreviewVisualisationLayer(tx, ty, tint);
             }
         }
 
@@ -2296,14 +2311,14 @@ public class Game {
         applyVisualisation();
 
         LogMessage("Visualizing " + mode + " movement for " + unit.getName()
-                + " (" + visualisationLayer.size() + " sectors, maxDist=" + maxDist + ").");
+                + " (" + previewVisualisationLayer.size() + " sectors, maxDist=" + maxDist + ").");
     }
 
     private void clearMovementVisualization() {
         activeMoveMode = null;
         movementUnit = null;
-        clearPreviewArrows();     // wipes the orange PREVIEW arrows on the board
-        clearVisualisationLayer(); // resets sectors AND empties the layer
+        clearPreviewArrows();
+        clearPreviewVisualisationLayer();
     }
     /**
      * Returns a progressively darker version of {@code base}.
@@ -2398,7 +2413,7 @@ public class Game {
         }
 
         // ---- Window ----
-        Stage popupStage = new Stage();
+        Stage popupStage = newChildStage();
         popupStage.initModality(Modality.APPLICATION_MODAL);
         popupStage.setTitle("Confirm Movement");
         popupStage.initStyle(StageStyle.TRANSPARENT);
@@ -2632,7 +2647,7 @@ public class Game {
         }
 
         // ----- Build and confirm the action -----
-        EndTurnAction action = new EndTurnAction(currentActionNumber, currentPlayer);
+        EndTurnAction action = new EndTurnAction(currentActionNumber+1, currentPlayer);
         showConfirmPopup(action, Color.GRAY, description);
     }
 
@@ -2649,12 +2664,26 @@ public class Game {
     //   CONSOLE COMMANDS (DM / Debug)
     // ============================================================
 
+    private void LogError(String error) {
+        TextArea output = dmConsoleOutput;
+        if (error == null || error.trim().isEmpty()) return;
+        LogMessage(error);
+        output.appendText(error);
+    }
+
+
     private void processDMCommand(String command, TextArea output) {
         if (command == null || command.trim().isEmpty()) return;
         String[] parts = command.trim().split(" ");
         String action = parts[0].toLowerCase();
         if (action.startsWith("/")) action = action.substring(1);
         switch (action) {
+            case "savegame":   output.appendText(cmdSaveGame(parts));   break;
+            case "saves":      output.appendText(cmdListSaves());       break;
+            case "opengame":   output.appendText(cmdOpenGame(parts));   break;
+            case "livegame":   output.appendText(cmdLiveGame());        break;
+            case "replacegame":output.appendText(cmdReplaceGame(parts));break;
+            case "revert":     output.appendText(cmdRevert(parts));     break;
             case "create":
                 if (parts.length < 4) {
                     output.appendText("Error: Usage: create <name> <x> <y> [team]\n");
@@ -2693,7 +2722,7 @@ public class Game {
                     }
                 }
                 DMCreateUnitAction createAction = new DMCreateUnitAction(
-                        currentActionNumber, "DM", name, x, y, team);
+                        currentActionNumber+1, "DM", name, x, y, team);
                 SendAction(createAction);
                 output.appendText("Sent DMCreateUnitAction for '" + name + "' at ("
                         + x + ", " + y + ") team=" + team + ".\n");
@@ -2767,14 +2796,14 @@ public class Game {
                 }
 
                 DMGiveWeaponAction gwAction = new DMGiveWeaponAction(
-                        currentActionNumber, "DM", gwUnitName, gwSlotNum, gwWeapon);
+                        currentActionNumber+1, "DM", gwUnitName, gwSlotNum, gwWeapon);
                 SendAction(gwAction);
                 output.appendText("Sent DMGiveWeaponAction: '" + gwWeapon.getName()
                         + "' → " + gwUnitName + " slot #" + gwSlotNum + ".\n");
                 break;
             case "round":
                 EndRoundAction action1 = new EndRoundAction(
-                        currentActionNumber, "DM");
+                        currentActionNumber+1, "DM");
                 SendAction(action1);
                 output.appendText("Sent Round end action");
                 break;
@@ -2802,7 +2831,7 @@ public class Game {
                     return;
                 }
                 SwitchTeamAction switchAction = new SwitchTeamAction(
-                        currentActionNumber, "DM", targetName, newTeam);
+                        currentActionNumber+1, "DM", targetName, newTeam);
                 SendAction(switchAction);
                 output.appendText("Sent SwitchTeamAction: " + targetName + " -> team " + newTeam + "\n");
                 break;
@@ -2827,7 +2856,7 @@ public class Game {
                         return;
                     }
                     DMDeleteUnitAction deleteAction = new DMDeleteUnitAction(
-                            currentActionNumber, "DM", dx, dy);
+                            currentActionNumber+1, "DM", dx, dy);
                     SendAction(deleteAction);
                     output.appendText("Sent DMDeleteUnitAction at (" + dx + ", " + dy + ").\n");
                     return;
@@ -2857,7 +2886,7 @@ public class Game {
                     return;
                 }
                 DMDeleteUnitAction deleteAction = new DMDeleteUnitAction(
-                        currentActionNumber, "DM", found.getX(), found.getY());
+                        currentActionNumber+1, "DM", found.getX(), found.getY());
                 SendAction(deleteAction);
                 output.appendText("Sent DMDeleteUnitAction for '" + delName +
                         "' at (" + found.getX() + ", " + found.getY() + ").\n");
@@ -2895,7 +2924,7 @@ public class Game {
                     return;
                 }
                 // Instead of directly setting, create a DMChoosePlayerAction
-                DMChoosePlayerAction dmAction = new DMChoosePlayerAction(currentActionNumber, "DM", activeName);
+                DMChoosePlayerAction dmAction = new DMChoosePlayerAction(currentActionNumber+1, "DM", activeName);
                 SendAction(dmAction);
                 output.appendText("DM chose next player: " + activeName + " and created dmAction "+dmAction.getActionNumber());
                 break;
@@ -2964,6 +2993,12 @@ public class Game {
                 output.appendText("  giveWeapon <slot> <weapon>            – replace current player's slot with a saved weapon\n");
                 output.appendText("  giveWeapon <unit> <slot> <weapon>     – same, but for a named unit\n");
                 output.appendText("  weapons                – list all saved weapons in Active/weapons/\n");
+                output.appendText("  savegame <name> [overwrite]   – saves the current game to the saved folder\n");
+                output.appendText("  saves                         – lists saved games\n");
+                output.appendText("  opengame <name>               – opens a save in your private DMgame (players unaffected)\n");
+                output.appendText("  livegame                      – returns you to the shared activegame\n");
+                output.appendText("  replacegame <name> confirm    – REPLACES activegame with a save; every client restarts\n");
+                output.appendText("  revert <actionNumber> confirm – deletes all actions after that number, loads result into activegame\n");
                 break;
 
             default:
@@ -3113,7 +3148,7 @@ public class Game {
     }
 
     private void checkShowPopUp() {
-
+        if (closed) return;
         if (!pendingActions.isEmpty()) {
             LogMessage("Check to show pop -> fail, has pending actions");
             return;
@@ -3133,12 +3168,13 @@ public class Game {
 
 
     private void showReactionPopup() {
+        if (closed) return;
         QueuePosition current = getCurrentPosition();
         if (current == null || !current.Reaction) return;
 
         popupShowing = true;
 
-        Stage popupStage = new Stage();
+        Stage popupStage = newChildStage();
         popupStage.initModality(Modality.NONE);
         popupStage.setTitle("Reaction Turn");
 
@@ -3802,7 +3838,7 @@ public class Game {
                 btn.setMaxWidth(Double.MAX_VALUE);
                 btn.setOnAction(ev -> {
                     DMChoosePlayerAction action = new DMChoosePlayerAction(
-                            currentActionNumber, "DM", unit.getName());
+                            currentActionNumber+1, "DM", unit.getName());
                     SendAction(action);
                     LogMessage("DM chose " + unit.getName() + " as the next player.");
                 });
@@ -3968,12 +4004,12 @@ public class Game {
                         Arrow.ArrowType.PREVIEW);
                 arrows.add(arrow);
             }
-            confirmAction = InventoryItemTransferAction.pickUpAction(currentActionNumber, currentPlayer,
+            confirmAction = InventoryItemTransferAction.pickUpAction(currentActionNumber+1, currentPlayer,
                     ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(toSlot), draggedFromField.getX()- evaUnit.getX(),
                     draggedFromField.getY() - evaUnit.getY());
             s = "Picking up "+item.getName()+" from ("+draggedFromField.getX()+","+draggedFromField.getY()+") with "+toSlot.getName();
         } else {
-            confirmAction = InventoryItemTransferAction.InventorySwitch(currentActionNumber, currentPlayer,
+            confirmAction = InventoryItemTransferAction.InventorySwitch(currentActionNumber+1, currentPlayer,
                     ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(fromSlot), ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(toSlot));
             s = "Putting "+item.getName()+" from "+fromSlot.getName()+" to "+toSlot.getName();
         }
@@ -3996,7 +4032,7 @@ public class Game {
                     Arrow.ArrowType.PREVIEW);
             arrows.add(arrow);
         }
-        confirmAction = InventoryItemTransferAction.dropAction(currentActionNumber, currentPlayer,
+        confirmAction = InventoryItemTransferAction.dropAction(currentActionNumber+1, currentPlayer,
                 ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(fromSlot), x- evaUnit.getX(), y- evaUnit.getY());
 
         createConfirmButton(confirmAction, Color.BLACK, "Dropping "+item.getName()+" from "+fromSlot.getName()+" to "+CordsToText(x, y));
@@ -5360,44 +5396,7 @@ public class Game {
     }
 
 
-    private void showResizeDialog() {
-        Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle("Viewport Size");
-        dialog.setHeaderText("Set the visible area size (in pixels)");
 
-        TextField widthField = new TextField(String.valueOf((int) viewport.getPrefWidth()));
-        TextField heightField = new TextField(String.valueOf((int) viewport.getPrefHeight()));
-        widthField.setPromptText("Width");
-        heightField.setPromptText("Height");
-
-        GridPane gridPane = new GridPane();
-        gridPane.setHgap(10);
-        gridPane.setVgap(10);
-        gridPane.setPadding(new Insets(20, 150, 10, 10));
-        gridPane.add(new Label("Width:"), 0, 0);
-        gridPane.add(widthField, 1, 0);
-        gridPane.add(new Label("Height:"), 0, 1);
-        gridPane.add(heightField, 1, 1);
-
-        dialog.getDialogPane().setContent(gridPane);
-        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
-
-        dialog.setResultConverter(buttonType -> {
-            if (buttonType == ButtonType.OK) {
-                try {
-                    double w = Double.parseDouble(widthField.getText());
-                    double h = Double.parseDouble(heightField.getText());
-                    resizeViewport(w, h);
-                } catch (NumberFormatException ex) {
-                    Alert alert = new Alert(Alert.AlertType.ERROR, "Please enter valid numbers.");
-                    alert.showAndWait();
-                }
-            }
-            return null;
-        });
-
-        dialog.showAndWait();
-    }
 
     // ---- Visual helpers (UI) ----
     public void refreshUnitPositions() {
@@ -5626,25 +5625,59 @@ public class Game {
 
     private static String sectorKey(int x, int y) { return x + "," + y; }
 
-    /** Adds (or replaces) a tint on sector (x, y). Does NOT repaint. */
-    private void addToVisualisationLayer(int x, int y, Color tint) {
-        visualisationLayer.put(sectorKey(x, y), tint);
+    /** Adds (or replaces) a tint on sector (x, y). DOES NOT REPAINT */
+    private void addToPreviewVisualisationLayer(int x, int y, Color tint) {
+        previewVisualisationLayer.put(sectorKey(x, y), tint);
+    }
+    private void addToPreviewVisualisationLayerRepaint(int x, int y, Color tint) {
+        previewVisualisationLayer.put(sectorKey(x, y), tint);
+        applyVisualisation();
+    }
+    /** Removes the preview tint from sector (x, y). Does NOT repaint. */
+    private void removeFromPreviewVisualisationLayer(int x, int y) {
+        previewVisualisationLayer.remove(sectorKey(x, y));
     }
 
-    /** Removes the tint from sector (x, y). Does NOT repaint. */
-    private void removeFromVisualisationLayer(int x, int y) {
-        visualisationLayer.remove(sectorKey(x, y));
-    }
-
-    /** Clears the entire layer and repaints the board. */
-    private void clearVisualisationLayer() {
-        visualisationLayer.clear();
+    /** Clears the entire preview layer*/
+    private void clearPreviewVisualisationLayer() {
+        previewVisualisationLayer.clear();
         applyVisualisation();
     }
 
     /** True if sector (x, y) currently has a tint applied. */
-    private boolean isInVisualisationLayer(int x, int y) {
-        return visualisationLayer.containsKey(sectorKey(x, y));
+    private boolean isInPreviewVisualisationLayer(int x, int y) {
+        return previewVisualisationLayer.containsKey(sectorKey(x, y));
+    }
+
+
+    /** Border used for sectors that belong to the attack layer (drawn over the preview border). */
+    private static final Color VIS_ATTACK_BORDER = Color.rgb(200, 0, 0);
+
+    /** Adds (or replaces) a tint on sector (x, y) in the attack layer. DOES NOT REPAINT */
+    private void addToAttackVisualisationLayer(int x, int y, Color tint) {
+        attackVisualisationLayer.put(sectorKey(x, y), tint);
+    }
+
+    /** Adds (or replaces) a tint in the attack layer and repaints the board. */
+    private void addToAttackVisualisationLayerRepaint(int x, int y, Color tint) {
+        attackVisualisationLayer.put(sectorKey(x, y), tint);
+        applyVisualisation();
+    }
+
+    /** Removes the attack tint from sector (x, y). Does NOT repaint. */
+    private void removeFromAttackVisualisationLayer(int x, int y) {
+        attackVisualisationLayer.remove(sectorKey(x, y));
+    }
+
+    /** Clears the entire attack layer and repaints. The preview layer is untouched. */
+    private void clearAttackVisualisationLayer() {
+        attackVisualisationLayer.clear();
+        applyVisualisation();
+    }
+
+    /** True if sector (x, y) currently has a tint in the attack layer. */
+    private boolean isInAttackVisualisationLayer(int x, int y) {
+        return attackVisualisationLayer.containsKey(sectorKey(x, y));
     }
 
     /**
@@ -5663,9 +5696,12 @@ public class Game {
         // 1. Reset every sector to its base color.
         gameBoard.SetBoardColorsToSectoryTypes();
 
-        // 2. Blend tints on top.
-        for (Map.Entry<String, Color> e : visualisationLayer.entrySet()) {
-            String[] parts = e.getKey().split(",");
+        // 2. Every sector touched by either layer
+        Set<String> keys = new LinkedHashSet<>(previewVisualisationLayer.keySet());
+        keys.addAll(attackVisualisationLayer.keySet());
+
+        for (String key : keys) {
+            String[] parts = key.split(",");
             int x, y;
             try {
                 x = Integer.parseInt(parts[0]);
@@ -5676,14 +5712,21 @@ public class Game {
             Sector s = gameBoard.getSector(x, y);
             if (s == null || s.getType() == null) continue;
 
-            Color base = s.getType().getColor();
-            Color tint = e.getValue();
-            Color blended = blendColors(base, tint, VIS_TINT_RATIO);
+            Color color = s.getType().getColor();
+
+            // Preview layer first (bottom)...
+            Color previewTint = previewVisualisationLayer.get(key);
+            if (previewTint != null) color = blendColors(color, previewTint, VIS_TINT_RATIO);
+
+            // ...attack layer on top
+            Color attackTint = attackVisualisationLayer.get(key);
+            if (attackTint != null) color = blendColors(color, attackTint, VIS_TINT_RATIO);
 
             s.setBackground(new Background(new BackgroundFill(
-                    blended, CornerRadii.EMPTY, Insets.EMPTY)));
+                    color, CornerRadii.EMPTY, Insets.EMPTY)));
             s.setBorder(new Border(new BorderStroke(
-                    VIS_BORDER, BorderStrokeStyle.SOLID,
+                    attackTint != null ? VIS_ATTACK_BORDER : VIS_BORDER,
+                    BorderStrokeStyle.SOLID,
                     CornerRadii.EMPTY, new BorderWidths(1.2))));
         }
     }
@@ -5715,28 +5758,347 @@ public class Game {
     // ============================================================
 
 
-    public static void startGame(Battlefield field, double speed, boolean fast, int playernumber) {
-        startGame(field, speed, fast, playernumber, "DM", true, GameState.GAME_MODE.CLASSIC);
+    // Existing signature stays, so MainMenu keeps working unchanged.
+    public static void startGame(Battlefield field, double speed, boolean fast, int playernumber,
+                                 String playerName, boolean startNew, GameState.GAME_MODE gameMode) throws IOException {
+        startGame(field, speed, fast, playernumber, playerName, startNew, gameMode,
+                GameStateStore.ACTIVE_DIR, false, false);
     }
 
-    public static void startGame(Battlefield field, double speed, boolean fast,
-                                 int playernumber, String playerName, boolean startNew) {
-        startGame(field, speed, fast, playernumber, playerName, startNew,
-                GameState.GAME_MODE.CLASSIC);
-    }
 
-    public static void startGame(Battlefield field, double speed, boolean fast,
-                                 int playernumber, String playerName, boolean startNew,
-                                 GameState.GAME_MODE gameMode) {
+
+    public static void startGame(Battlefield field, double speed, boolean fast, int playernumber,
+                                 String playerName, boolean startNew, GameState.GAME_MODE gameMode,
+                                 Path stateDir, boolean sandbox, boolean initialloading) throws IOException {
         System.out.println("Starting game with speed " + speed + " fast " + fast
                 + " playernumber " + playernumber + " gamemode " + gameMode);
         if (startNew) {
-            new Game(field, "DM", speed, fast, playernumber, true, gameMode);
+            new Game(field, "DM", speed, fast, playernumber, true, gameMode, stateDir, sandbox, initialloading);
         } else {
             System.out.println("Connecting as " + playerName);
-            new Game(field, playerName, speed, fast, -1, false, gameMode);
+            new Game(field, playerName, speed, fast, -1, false, gameMode, stateDir, sandbox, initialloading);
         }
     }
+
+
+    private Stage newChildStage() {
+        Stage s = new Stage();
+        s.initOwner(stage);   // must be called before show()
+        childStages.add(s);
+        // A listener doesn't overwrite any setOnHidden you set later.
+        s.showingProperty().addListener((obs, was, is) -> {
+            if (!is) childStages.remove(s);
+        });
+        return s;
+    }
+
+
+    private void shutdown() {
+        if (closed) return;
+        closed = true;
+
+        // Stop the action-processing animation
+        if (processingTimeline != null) {
+            processingTimeline.stop();
+            processingTimeline = null;
+        }
+        pendingActions.clear();
+        isProcessing = false;
+        popupShowing = false;
+
+
+        // Close every popup that is still open
+        for (Stage s : new ArrayList<>(childStages)) {
+            s.close();
+        }
+        childStages.clear();
+    }
+
+    /** True if two or more actions in the state share the same action number. */
+    private boolean hasDuplicateActionNumbers(GameState state) {
+        Set<Integer> seen = new HashSet<>();
+        for (Action a : state.getActions()) {
+            if (!seen.add(a.getActionNumber())) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Attempts to repair a state whose actions share action numbers.
+     * Builds a NEW GameState with copies of all actions in their original order,
+     * numbered 1-N by their position in the list (the same scheme initializeUnits uses).
+     * The original file is backed up first.
+     */
+
+    /** Short readable description of an action for logs. Never throws. */
+    private String describeAction(Action a) {
+        StringBuilder sb = new StringBuilder(a.getClass().getSimpleName())
+                .append(" actor=").append(a.getActor());
+        try {
+            // Only use toString() if the action class actually overrides it
+            if (a.getClass().getMethod("toString").getDeclaringClass() != Object.class) {
+                sb.append(" | ").append(a);
+            }
+        } catch (Exception e) {
+            sb.append(" | (details unavailable: ").append(e.getClass().getSimpleName()).append(")");
+        }
+        return sb.toString();
+    }
+
+    private GameState CorruptedStateAttemptedFix(GameState corrupted) {
+        LogError("ERROR - CORRUPTED GameState: duplicate action numbers found. Attempting to fix by renumbering.");
+
+
+        // Group actions by number, remembering their position in the list
+        Map<Integer, List<Integer>> indicesByNumber = new TreeMap<>();
+        List<Action> allActions = corrupted.getActions();
+        for (int i = 0; i < allActions.size(); i++) {
+            indicesByNumber.computeIfAbsent(allActions.get(i).getActionNumber(), k -> new ArrayList<>()).add(i);
+        }
+
+        indicesByNumber.forEach((num, indices) -> {
+            if (indices.size() > 1) {
+                LogError("ERROR - action number " + num + " is used by " + indices.size() + " actions:");
+                for (int idx : indices) {
+                    LogError("    list position " + idx + ": " + describeAction(allActions.get(idx)));
+                }
+            }
+        });
+
+        // Keep the broken file so nothing is lost
+        try {
+            Path file = stateFile();
+            if (Files.exists(file)) {
+                Files.copy(file, Paths.get(GAME_STATE_DIR, GAME_STATE_FILE + ".corrupted.bak"),
+                        StandardCopyOption.REPLACE_EXISTING);
+                LogMessage("Backed up corrupted GameState to " + GAME_STATE_FILE + ".corrupted.bak");
+            }
+        } catch (IOException e) {
+            LogError("Could not back up corrupted GameState: " + e.getMessage());
+        }
+
+        GameState fixed = new GameState();
+        fixed.setGameMode(corrupted.getGameMode());
+        fixed.setInitialState(corrupted.getInitialState());
+        fixed.setSessionId(corrupted.getSessionId());
+
+        List<Action> actions = corrupted.getActions();
+        for (int i = 0; i < actions.size(); i++) {
+            Action copy = copyAction(actions.get(i));
+            int oldNumber = copy.getActionNumber();
+            setActionNumber(copy, i + 1);        // was: copy.setActionNumber(i + 1);
+            fixed.addAction(copy);
+            if (oldNumber != i + 1) {
+                LogMessage("Renumbered " + copy.getClass().getSimpleName()
+                        + " from " + oldNumber + " to " + (i + 1));
+            }
+        }
+
+        LogMessage("CorruptedStateAttemptedFix finished: " + actions.size() + " actions renumbered.");
+        return fixed;
+    }
+    /** Sets Action.ActionNumber (final) via reflection so Action's serialized form doesn't change. */
+    private static void setActionNumber(Action action, int number) {
+        try {
+            java.lang.reflect.Field f = Action.class.getDeclaredField("ActionNumber");
+            f.setAccessible(true);
+            f.setInt(action, number);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Could not renumber action", e);
+        }
+    }
+    /** Deep copy through serialization (actions are already Serializable). Falls back to the original. */
+    private Action copyAction(Action original) {
+        try (ByteArrayOutputStream bos = new ByteArrayOutputStream();
+             ObjectOutputStream oos = new ObjectOutputStream(bos)) {
+            oos.writeObject(original);
+            oos.flush();
+            try (ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(bos.toByteArray()))) {
+                return (Action) ois.readObject();
+            }
+        } catch (IOException | ClassNotFoundException e) {
+            LogError("Could not copy action " + original.getActionNumber() + ", reusing the original: " + e.getMessage());
+            return original;
+        }
+    }
+
+
+
+
+
+
+
+    private boolean isSessionReplaced(GameState onDisk) {
+        return !dmSandbox && sessionKnown && onDisk != null
+                && !Objects.equals(knownSessionId, onDisk.getSessionId());
+    }
+
+    /** Called on players (and the DM's other windows) when the DM swapped the active game. */
+    private void onSessionReplacedByDM() {
+        if (restarting || closed) return;
+        restarting = true;
+        Platform.runLater(() -> {
+            shutdown();   // stop processing, watcher and popups first
+            Alert a = new Alert(Alert.AlertType.INFORMATION,
+                    "The DM has loaded a different game.\nYour session will restart with the new game.",
+                    ButtonType.OK);
+            a.setHeaderText("Game replaced");
+            a.showAndWait();
+            relaunch(GameStateStore.ACTIVE_DIR, false);
+        });
+    }
+
+    /** Closes this window and starts a new Game on the given folder. */
+    private void relaunch(Path dir, boolean sandbox) {
+        Platform.runLater(() -> {
+            shutdown();
+            stage.close();
+            try {
+                Game.startGame(new Battlefield(50, 50), actionSpeed, fastActions,
+                        1, currentPlayer, false, GameState.GAME_MODE.CLASSIC, dir, sandbox, true);
+            } catch (IOException e) {
+                LogError("Could not restart the game: " + e.getMessage());
+            }
+        });
+    }
+
+
+
+
+    private String cmdSaveGame(String[] parts) {
+        if (parts.length < 2) return "Usage: savegame <name> [overwrite]\n";
+        boolean overwrite = parts.length > 2 && parts[2].equalsIgnoreCase("overwrite");
+        try {
+            GameState snap = currentStateSnapshot();
+            GameStateStore.saveAs(snap, parts[1], overwrite);
+            return "Saved " + snap.getActionCount() + " actions as '" + parts[1] + "'.\n";
+        } catch (IllegalArgumentException e) {
+            return e.getMessage() + "\n";
+        } catch (FileAlreadyExistsException e) {
+            return "A save named '" + parts[1] + "' already exists. Add 'overwrite' to replace it.\n";
+        } catch (IOException e) {
+            return "Save failed: " + e.getMessage() + "\n";
+        }
+    }
+
+    private String cmdListSaves() {
+        try {
+            List<String> names = GameStateStore.listSaves();
+            if (names.isEmpty()) return "  (no saves)\n";
+            StringBuilder sb = new StringBuilder("Saved games:\n");
+            for (String n : names) {
+                sb.append("  ").append(n);
+                try {
+                    GameState s = GameStateStore.loadSave(n);
+                    if (s != null) sb.append("   (").append(s.getActionCount()).append(" actions)");
+                } catch (IOException e) {
+                    sb.append("   (unreadable)");
+                }
+                sb.append('\n');
+            }
+            return sb.toString();
+        } catch (IOException e) {
+            return "Could not list saves: " + e.getMessage() + "\n";
+        }
+    }
+
+    private String cmdOpenGame(String[] parts) {
+        if (parts.length < 2) return "Usage: opengame <name>\n";
+        try {
+            GameState s = GameStateStore.loadSave(parts[1]);
+            if (s == null) return "No save named '" + parts[1] + "'.\n";
+            GameStateStore.write(s, GameStateStore.DM_DIR);   // overwrites the previous sandbox
+            relaunch(GameStateStore.DM_DIR, true);
+            return "Opening '" + parts[1] + "' in DMgame...\n";
+        } catch (IllegalArgumentException e) {
+            return e.getMessage() + "\n";
+        } catch (IOException e) {
+            return "Open failed: " + e.getMessage() + "\n";
+        }
+    }
+
+    private String cmdLiveGame() {
+        if (!dmSandbox) return "You are already in the active game.\n";
+        relaunch(GameStateStore.ACTIVE_DIR, false);
+        return "Returning to the active game...\n";
+    }
+
+    private String cmdReplaceGame(String[] parts) {
+        if (parts.length < 2) return "Usage: replacegame <name> confirm\n";
+        boolean confirm = parts.length > 2 && parts[2].equalsIgnoreCase("confirm");
+        try {
+            GameState s = GameStateStore.loadSave(parts[1]);
+            if (s == null) return "No save named '" + parts[1] + "'.\n";
+            if (!confirm) {
+                return "This replaces the active game (" + s.getActionCount() + " actions in '" + parts[1]
+                        + "') and forces ALL players to restart. The current active game is backed up first.\n"
+                        + "Type: replacegame " + parts[1] + " confirm\n";
+            }
+            restarting = true;      // stops our own watcher from also reacting to the change
+            try {
+                String backup = GameStateStore.backupActive();
+                GameStateStore.replaceActive(s);
+                LogMessage("Active game replaced with '" + parts[1] + "'. Old one backed up as " + backup);
+            } catch (IOException e) {
+                restarting = false;
+                return "Replace failed: " + e.getMessage() + "\n";
+            }
+            relaunch(GameStateStore.ACTIVE_DIR, false);
+            return "Active game replaced. Restarting...\n";
+        } catch (IllegalArgumentException e) {
+            return e.getMessage() + "\n";
+        } catch (IOException e) {
+            return "Replace failed: " + e.getMessage() + "\n";
+        }
+    }
+
+    private String cmdRevert(String[] parts) {
+        if (parts.length < 2) return "Usage: revert <actionNumber> confirm\n";
+        boolean confirm = parts.length > 2 && parts[2].equalsIgnoreCase("confirm");
+        int n;
+        try {
+            n = Integer.parseInt(parts[1]);
+        } catch (NumberFormatException e) {
+            return "Action number must be an integer.\n";
+        }
+        GameState source = currentStateSnapshot();
+        GameState reverted;
+        try {
+            reverted = source.revertedTo(n);
+        } catch (IllegalArgumentException e) {
+            return e.getMessage() + "\n";
+        }
+        int removed = source.getActionCount() - reverted.getActionCount();
+        if (!confirm) {
+            return "Reverting to action " + n + " deletes " + removed + " action(s) and loads the result into the "
+                    + "active game for ALL players. The current active game is backed up first.\n"
+                    + "Type: revert " + n + " confirm\n";
+        }
+        restarting = true;
+        try {
+            GameStateStore.replaceActive(reverted);
+        } catch (IOException e) {
+            restarting = false;
+            return "Revert failed: " + e.getMessage() + "\n";
+        }
+        relaunch(GameStateStore.ACTIVE_DIR, false);
+        return "Reverted to action " + n + " (" + removed + " removed). Restarting...\n";
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 }

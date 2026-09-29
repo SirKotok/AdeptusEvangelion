@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 public class GameState implements Serializable {
 
@@ -102,4 +103,44 @@ public class GameState implements Serializable {
     public void setInitialState(InitialState initialState) {
         this.initialState = initialState;
     }
+
+
+
+    // field
+    private String sessionId = UUID.randomUUID().toString();   // only set by the constructor, so old files load as null
+    public String getSessionId() { return sessionId; }
+    public void setSessionId(String id) { this.sessionId = id; }
+    public void newSession() { this.sessionId = UUID.randomUUID().toString(); }
+
+    /** Deep copy through serialization. */
+    public GameState deepCopy() {
+        try (ByteArrayOutputStream bos = new ByteArrayOutputStream();
+             ObjectOutputStream oos = new ObjectOutputStream(bos)) {
+            oos.writeObject(this);
+            oos.flush();
+            try (ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(bos.toByteArray()))) {
+                return (GameState) ois.readObject();
+            }
+        } catch (IOException | ClassNotFoundException e) {
+            throw new IllegalStateException("Could not copy GameState", e);
+        }
+    }
+
+    /**
+     * Returns a NEW state that keeps actions up to and including actionNumber (by list order)
+     * and drops everything after. If a number is duplicated in an old file, the last one is used.
+     * The original is untouched. The result has a new sessionId.
+     */
+    public GameState revertedTo(int actionNumber) {
+        GameState copy = deepCopy();
+        int keep = -1;
+        for (int i = 0; i < copy.ActionList.size(); i++) {
+            if (copy.ActionList.get(i).getActionNumber() == actionNumber) keep = i + 1;
+        }
+        if (keep < 0) throw new IllegalArgumentException("No action with number " + actionNumber);
+        copy.ActionList = new ArrayList<>(copy.ActionList.subList(0, keep));
+        copy.newSession();
+        return copy;
+    }
+
 }

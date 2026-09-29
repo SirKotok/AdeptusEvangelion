@@ -51,6 +51,9 @@ Positron Weapons pierce all manner of protections with ease.  Positron Weapons h
 
         *  */
 
+
+
+
         public Tech nextTech() {
             Tech[] values = Tech.values();
             int nextIndex = (this.ordinal() + 1) % values.length;
@@ -172,7 +175,10 @@ Positron Weapons pierce all manner of protections with ease.  Positron Weapons h
         Ranged = ranged;
     }
 
-
+    public boolean hasActivatableTech(){
+        return this.getCurrentTech() == Weapon.Tech.N2SHELL
+                || this.getCurrentTech() == Weapon.Tech.MASER;
+    }
    public int defensive;
 
     public int getDefensive() {
