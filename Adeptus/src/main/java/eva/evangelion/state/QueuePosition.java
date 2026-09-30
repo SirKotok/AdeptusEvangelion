@@ -1,11 +1,13 @@
 package eva.evangelion.state;
 
 public class QueuePosition {
+
     public enum ReactionType {
         DM_SETUP_PLAYER,
         PLAYER_SETUP,
         ATTACK_OF_OPPORTUNITY,
-        DM_DRAMA_MOVEMENT
+        DM_DRAMA_MOVEMENT,
+        DEFENCE
     }
 
     public int Round = -1;

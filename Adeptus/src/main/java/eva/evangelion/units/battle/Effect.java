@@ -1,15 +1,19 @@
 package eva.evangelion.units.battle;
 
+import java.io.Serializable;
+
 /**
  * Represents a single active modifier on a {@link FieldUnit}.
  * Every stat except Toughness (the damage pool) is expressed as a delta.
  * Toughness itself is handled specially on FieldUnit, since it has its own
  * setter and damage method.
  */
-public class Effect {
+public class Effect implements Serializable {
 
     /** When the effect is automatically cleared. */
     public enum EffectEnd {
+        GUARD,
+        ATTACK,
         NEVER,      // lasts until manually removed (e.g. permanent upgrades)
         TURN_END,   // cleared at the end of the current Turn
         ROUND_END,  // cleared at the end of the current Round
@@ -26,7 +30,7 @@ public class Effect {
     private int deltaReflexes       = 0;
     private int deltaSpeed          = 0;
     private int deltaMaxToughness   = 0;
-
+    private boolean stacks = true;
     public Effect(String name, EffectEnd effectEnd) {
         this.name = name;
         this.effectEnd = effectEnd;
@@ -83,4 +87,37 @@ public class Effect {
                 ", maxT=" + deltaMaxToughness +
                 '}';
     }
+
+
+
+    public boolean isStacks() { return stacks; }
+
+    /** Superconductive: -10 Accuracy until the target's next Attack. */
+    public static Effect superconductiveAttack() {
+        Effect debuff = new Effect("Superconductive_Attack", EffectEnd.ATTACK).withAccuracy(-10);
+        debuff.stacks = false;
+        return debuff;
+    }
+
+    /** Superconductive: -10 Reflexes until the target's next Guard. */
+    public static Effect superconductiveGuard() {
+        Effect debuff = new Effect("Superconductive_Guard", EffectEnd.GUARD).withReflexes(-10);
+        debuff.stacks = false;
+        return debuff;
+    }
+
+    /** Independent copy, so one attack can give each target its own instance. */
+    public Effect copy() {
+        Effect e = new Effect(name, effectEnd);
+        e.deltaAccuracy       = deltaAccuracy;
+        e.deltaAttackStrength = deltaAttackStrength;
+        e.deltaArmor          = deltaArmor;
+        e.deltaReflexes       = deltaReflexes;
+        e.deltaSpeed          = deltaSpeed;
+        e.deltaMaxToughness   = deltaMaxToughness;
+        e.stacks = stacks;
+        return e;
+    }
+
 }
+

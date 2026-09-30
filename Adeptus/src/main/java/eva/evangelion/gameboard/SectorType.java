@@ -90,7 +90,7 @@ public class SectorType extends StackPane implements Serializable {
     public static SectorType Wall = new SectorType("Wall", Color.BLACK, false, false,
             false, 0, 0, 0,
             0, false, 0, 0, false, false);
-    public static SectorType Destroyed = new SectorType("Destroyed", Color.WHITESMOKE, true, false,
+    public static SectorType Destroyed = new SectorType("Destroyed", Color.GREY, true, false,
             false, 0, 0, 0,
             0, false, 0, 0, false, true);
     public static SectorType Acid = new SectorType("Acid", Color.LIMEGREEN, true, false,

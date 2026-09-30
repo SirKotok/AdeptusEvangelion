@@ -466,7 +466,9 @@ public class Game {
             processForcedRoundEnd((EndRoundAction) action);
         } else if (action instanceof DMDeleteUnitAction) {
             processDMDeleteUnitAction((DMDeleteUnitAction) action);
-        }  else if (action instanceof createDMSetUpPopUpAction) {
+        } else if (action instanceof DefenceAction) {
+            processDefenceAction((DefenceAction) action);
+        }   else if (action instanceof createDMSetUpPopUpAction) {
             processCreateDMSetUp((createDMSetUpPopUpAction) action);
         } else if (action instanceof AddPlayerAction) {
             processAddInitialPlayerAction((AddPlayerAction) action);
@@ -496,41 +498,291 @@ public class Game {
 
 
 
-    private void processAttackAction(AttackAction attack) {
+    // ============================================================
+//   ATTACK PROCESSING
+// ============================================================
 
+    /** Area attacks (and their overlap) also hit the attacker if he stands inside the zone. */
+    private static final boolean AREA_CAN_HIT_ATTACKER = true;
+    private static final int LAYERED_FIELD_ARMOR = 3;
+
+    private record Cell(int x, int y) {}
+
+    private void processAttackAction(AttackAction attack) {
         FieldUnit attacker = getUnitFromName(attack.getActor());
-        if (attacker == null || !attacker.isExists()) {
-            LogError("ERROR - attacker doesnt exist");
+        AttackProfile profile = attack.getActionCombatProfile();
+        if (attacker == null || !attacker.isExists() || profile == null) {
+            LogError("ERROR - attacker or attack profile missing at action " + attack.getActionNumber() + "\n");
+            activateQueue(attack);     // don't stall the queue
             return;
         }
-        //TODO FINSIH MAKING ATTACK ACTION WORK
+
+        // ---- 1. TN sanity check (must be done BEFORE ATTACK effects are cleared) ----
+        int expectedTN = AttackAction.clampTN(attacker.getAccuracy());
+        if (expectedTN != attack.accuracyTN) {
+            LogError("ERROR - accuracy TN mismatch at action " + attack.getActionNumber()
+                    + ": action says " + attack.accuracyTN + ", attacker has " + expectedTN + "\n");
+        }
+        attacker.ClearEffects(Effect.EffectEnd.ATTACK);   // e.g. Superconductive (Attack)
+
+        // ---- 2. Ammo ----
+        spendAmmo(attacker, attack, profile);
+
+        // ---- 3. Every affected sector, each exactly once ----
+        Set<Cell> cells = collectAffectedCells(attacker, attack, profile);
+
+        // ---- 4. Sector replacement (Area and Line only) ----
+        if (profile.AreaType != -1) replaceSectors(cells, profile);
+
+        // ---- 5. Who is hit, who is missed ----
+        boolean canMiss = profile.AreaType == -1;
+        boolean rollOk = attack.isRollSuccess();
+        List<FieldUnit> hitUnits = new ArrayList<>();
+        List<FieldUnit> missedUnits = new ArrayList<>();
+        for (Cell c : cells) {
+            FieldUnit u = getUnitAt(c.x(), c.y());
+            if (u == null || !u.isExists()) continue;
+            if (u == attacker && (canMiss || !AREA_CAN_HIT_ATTACKER)) continue;
+            if (canMiss && !rollOk) missedUnits.add(u);
+            else hitUnits.add(u);
+        }
+
+        for (FieldUnit missed : missedUnits) {
+            LogMessage(attacker.getName() + " missed " + missed.getName());
+            if (!initialLoad && missed.getName().equals(currentPlayer)) {
+                showAttackMissedPopup(attacker.getName());
+            }
+        }
+
+        // ---- 6. Visuals ----
+        animateAttack(attacker, attack);
+
+        // ---- 7. Queue: attacker(processed) -> defences -> attacker ----
+        activateQueue(attack);
+
+        boolean halved = isReducedByMiss(attack);
+        int insertAt = 0;
+        for (FieldUnit target : hitUnits) {
+            // Guard is disabled against a missed Area/Line, so then only Layered Field can help.
+            boolean canReact = target.canDefend() && (target.getATP() > 0 || !halved);
+            if (!canReact) {
+                processHit(attack, attacker, target);
+                continue;
+            }
+            String desc = "You have been shot at by " + attacker.getName() + " and they hit"
+                    + (halved ? " (missed, but the " + (profile.AreaType == -2 ? "line" : "area")
+                    + " still hits you for half damage)" : "")
+                    + ", choose your defence option.";
+            QueuePosition reaction = QueuePosition.createReactionTurn(
+                    target.getName(), ReactionType.DEFENCE, desc, attack.getActionNumber());
+            reaction.setSkippable(false);
+            queue.addPosition(reaction, insertAt++);
+            LogMessage("Added DEFENCE reaction for " + target.getName());
+        }
+
+        QueuePosition attackerTurn = new QueuePosition(attacker.getName(), false);
+        attackerTurn.setActionNumber(-1);
+        queue.addPosition(attackerTurn, insertAt);
+    }
+
+
+    private void processDefenceAction(DefenceAction def) {
+        FieldUnit defender = getUnitFromName(def.getActor());
+        QueuePosition pos = queue.currentPosition();   // grab BEFORE activateQueue moves on
+
+        if (defender == null || !defender.isExists() || pos == null
+                || pos.getReactionType() != ReactionType.DEFENCE) {
+            LogError("ERROR - DefenceAction " + def.getActionNumber() + " has no matching defence turn\n");
+            activateQueue(def);
+            return;
+        }
+
+        if (def.guardRolled) {
+            if (AttackAction.clampTN(defender.getReflexes()) != def.guardTN) {
+                LogError("ERROR - guard TN mismatch at action " + def.getActionNumber() + "\n");
+            }
+            defender.setUsedGuard(true);
+            defender.ClearEffects(Effect.EffectEnd.GUARD);   // e.g. Superconductive (Guard)
+        }
+
+        Action reactedTo = gamestate.getActionfromNumber(pos.getReactionTo());
+        if (reactedTo instanceof AttackAction atk) {
+            FieldUnit attacker = getUnitFromName(atk.getActor());
+            boolean guardWorks = def.isGuardSuccess()
+                    && !isReducedByMiss(atk)
+                    && canBeDefendedAgainst(atk.getActionCombatProfile());
+            if (guardWorks) {
+                LogMessage(defender.getName() + " guarded the attack from " + atk.getActor() + " (rolled "
+                        + def.guardRoll + " vs " + def.guardTN + ")");
+                // TODO Chain: Strain is applied even when the target guards (FieldUnit has no Strain yet)
+            } else {
+                processHit(atk, attacker, defender, def.layeredField ? LAYERED_FIELD_ARMOR : 0);
+            }
+        } else {
+            LogError("ERROR - DefenceAction is not reacting to an AttackAction\n");
+        }
+
+        activateQueue(def);    // just move on, the queue is not changed
+    }
+
+    private void processHit(AttackAction attack, FieldUnit attacker, FieldUnit defender) {
+        processHit(attack, attacker, defender, 0);
+    }
+
+    /**
+     * Damage -> (halved if Area/Line missed) -> Armor (+ bonus) reduced by Penetration -> Toughness.
+     * Then every on-hit effect of the profile is copied onto the defender if damage got through.
+     * The attacker is currently unused.
+     */
+    private void processHit(AttackAction attack, FieldUnit attacker, FieldUnit defender, int bonusArmor) {
+        AttackProfile profile = attack.getActionCombatProfile();
+        if (profile == null || defender == null || !defender.isExists()) return;
+
+        int raw = attack.rolledDamage;
+        if (isReducedByMiss(attack)) raw /= 2;               // before armor
+
+        int armor = Math.max(0, defender.getArmor() + bonusArmor - profile.Penetration);
+        int damage = Math.max(0, raw - armor);
+
+        int toughnessBefore = defender.getToughness();
+        defender.DealToughnessDamage(damage);
+        int overflow = Math.max(0, damage - toughnessBefore);
+
+        LogMessage(defender.getName() + " takes " + damage + " damage (" + raw + " raw, armor after penetration "
+                + armor + "). Toughness " + toughnessBefore + " -> " + defender.getToughness());
+        if (overflow > 0) {
+            LogMessage(defender.getName() + " has " + overflow + " overflow damage");
+            // TODO Wound trigger
+        }
+        // TODO Strain (profile.Strain) once FieldUnit has a Strain stat
+
+        if (damage > 0) {
+            for (Effect e : profile.onHitEffects) {
+                defender.addEffect(e.copy());     // FieldUnit.addEffect skips non-stacking duplicates
+                LogMessage(defender.getName() + " gains " + e.getName());
+            }
+        }
+    }
+
+
+
+
+
+
+    /** True for Area/Line attacks whose roll failed: they still hit, but for half damage. */
+    private boolean isReducedByMiss(AttackAction attack) {
+        AttackProfile p = attack.getActionCombatProfile();
+        return p != null && p.AreaType != -1 && !attack.isRollSuccess();
+    }
+
+    /** TODO: hook for future profile properties that make an attack impossible to Guard against. */
+    private boolean canBeDefendedAgainst(AttackProfile profile) {
+        return true;
+    }
+
+    private void spendAmmo(FieldUnit attacker, AttackAction attack, AttackProfile profile) {
+        if (profile.AmmoCost <= 0) return;
+        List<Slot> slots = attacker.getSlots();
+        if (slots == null || attack.slotNumber < 0 || attack.slotNumber >= slots.size()
+                || !(slots.get(attack.slotNumber).getItem() instanceof Weapon w)) {
+            LogError("ERROR - attack at " + attack.getActionNumber() + " costs ammo but has no weapon\n");
+            return;
+        }
+        int left = w.getAmmo() - profile.AmmoCost;
+        if (left < 0) LogError("ERROR = AMMO LESS THAN 0 AT " + attack.getActionNumber() + "\n");
+        w.setAmmo(Math.max(0, left));
+    }
+
+    /**
+     * All sectors touched by the attack, deduplicated (overlapping areas / lines / multihit
+     * on the same sector count once). The hit locations themselves are always included.
+     * For a line the stored hit is the END of the line, so the whole line is rebuilt from it.
+     */
+    private Set<Cell> collectAffectedCells(FieldUnit attacker, AttackAction attack, AttackProfile profile) {
+        Set<Cell> cells = new LinkedHashSet<>();
+        int ax = attacker.getX(), ay = attacker.getY();
 
         for (AttackAction.Hit h : attack.getHitPositions()) {
-            int hx = attacker.getX() + h.deltax;
-            int hy = attacker.getY() + h.deltay;
-            if (hx < 0 || hx >= battlefield.sizeX || hy < 0 || hy >= battlefield.sizeY) {
-                LogMessage("hit outside of board");
-                continue;
-            }
-            FieldUnit target = getUnitAt(hx, hy);
-            if (target == null || !target.isExists()) {
-                LogMessage("hit has no target");
-                continue;
-            }
-            String targetNAme = target.getName();
-            QueuePosition playerReaction = QueuePosition.createReactionTurn(
-                    targetNAme,
-                    ReactionType.PLAYER_SETUP,
-                    "Defence against an attack from "+attacker.getName()+" that will hit with damage ", attack.getActionNumber()
-            );
-            playerReaction.setSkippable(false);
-            LogMessage("current starting players = "+startingplayernumber);
-            queue.addPosition(playerReaction,startingplayernumber-1);
-            LogMessage("Added PLAYER_SETUP reaction turn for " + targetNAme+" at position "+queue.getNUMPOSof(playerReaction));
+            int hx = ax + h.deltax, hy = ay + h.deltay;
 
+            if (profile.AreaType == -2) {
+                int len = Math.max(Math.abs(h.deltax), Math.abs(h.deltay));
+                boolean straight = h.deltax == 0 || h.deltay == 0 || Math.abs(h.deltax) == Math.abs(h.deltay);
+                if (len == 0 || !straight) {
+                    LogError("ERROR - line hit " + h + " is not a straight line\n");
+                    if (isOnBoard(hx, hy)) cells.add(new Cell(hx, hy));
+                    continue;
+                }
+                for (int[] s : getLineSectors(ax, ay, Integer.signum(h.deltax), Integer.signum(h.deltay), len)) {
+                    cells.add(new Cell(s[0], s[1]));
+                }
+                if (isOnBoard(hx, hy)) cells.add(new Cell(hx, hy));    // no-op if already in the line
+                continue;
+            }
+
+            if (isOnBoard(hx, hy)) cells.add(new Cell(hx, hy));
+            else LogMessage("hit outside of board " + h);
+
+            if (profile.AreaType >= 0) {
+                int r = profile.AreaType;
+                for (int ox = -r; ox <= r; ox++) {
+                    for (int oy = -r; oy <= r; oy++) {
+                        if (isOnBoard(hx + ox, hy + oy)) cells.add(new Cell(hx + ox, hy + oy));
+                    }
+                }
+            }
         }
-        activateQueue(attack);
-        setActorToNext(attack);
+        return cells;
+    }
+
+    private void replaceSectors(Set<Cell> cells, AttackProfile profile) {
+        SectorType replacement = profile.getReplace();
+        if (replacement == null || gameBoard == null) return;
+        int changed = 0;
+        for (Cell c : cells) {
+            Sector s = gameBoard.getSector(c.x(), c.y());
+            if (s == null || !s.getType().Replacable) continue;   // e.g. mines
+            s.setType(replacement);
+            changed++;
+        }
+        if (changed > 0) {
+            LogMessage("Replaced " + changed + " sector(s) with " + replacement.Name);
+            applyVisualisation();     // resets colours from the new types and re-applies the layers
+        }
+    }
+
+    /** Red arrows from the attacker to every stored hit location (line: to the end of the line). */
+    private void animateAttack(FieldUnit attacker, AttackAction attack) {
+        double duration = isFast() ? 0 : attack.getTime() / actionSpeed;
+        for (AttackAction.Hit h : attack.getHitPositions()) {
+            int sx = attacker.getX(), sy = attacker.getY();
+            int ex = sx + h.deltax, ey = sy + h.deltay;
+            if (duration <= 0) DrawArrow(Color.RED, sx, sy, ex, ey, Arrow.ArrowType.ACTION);
+            else drawAnimatedArrow(Color.RED, sx, sy, ex, ey, duration, Arrow.ArrowType.ACTION);
+        }
+    }
+
+    /** Information only: not a turn, does not block processing. */
+    private void showAttackMissedPopup(String attackerName) {
+        if (closed) return;
+        Stage s = newChildStage();
+        s.initModality(Modality.NONE);
+        s.setTitle("Attack missed");
+
+        Label msg = new Label("You have been attacked by " + attackerName + ", but they missed.");
+        msg.setWrapText(true);
+        msg.setMaxWidth(320);
+        msg.setStyle("-fx-font-size: 14px; -fx-font-weight: bold;");
+
+        BetterButton ok = new BetterButton("OK");
+        ok.setPrimaryStyle();
+        ok.setOnAction(e -> s.close());
+
+        VBox box = new VBox(15, msg, ok);
+        box.setPadding(new Insets(20));
+        box.setAlignment(Pos.CENTER);
+        s.setScene(new Scene(box, 360, 150));
+        s.show();
     }
 
 
@@ -543,9 +795,10 @@ public class Game {
      * Returns 0 when there was no roll.
      */
     private int computeDos(int roll, int accuracy) {
-        if (roll <= 0) return 0;
-        return Math.max(0, (accuracy - roll) / 10);
+        return AttackAction.dosFor(roll, accuracy);
     }
+
+
 
     private void processMoveAction(MoveAction movement) {
         FieldUnit actor = getUnitFromName(movement.getActor());
@@ -1494,14 +1747,20 @@ public class Game {
     }
 
 
-    //Weapon profile handles all things that relate to the weapon but do not depend on the roll results. Creating combat profile will copy it to
-    //create a version thats influenced by Evangelion's effects and Predicate options
-    private AttackProfile copyProfileAndApplyEffects(
-            AttackProfile weaponProfile) {
-     return weaponProfile.copy();
+    private AttackProfile copyProfileAndApplyEffects(AttackProfile weaponProfile) {
+        AttackProfile c = weaponProfile.copy();
+        if (!c.strengthApplied && attackUnit != null) {
+            c.Power += attackUnit.getAttackStrength();
+            c.strengthApplied = true;
+        }
+        return c;
     }
+
     private AttackProfile turnIntoCombatProfile(AttackProfile weaponProfile, FieldUnit unit) {
-        weaponProfile.Power+=unit.getAttackStrength();
+        if (!weaponProfile.strengthApplied) {
+            weaponProfile.Power += unit.getAttackStrength();
+            weaponProfile.strengthApplied = true;
+        }
         return weaponProfile;
     }
 // ------------------------------------------------------------------
@@ -1576,14 +1835,10 @@ public class Game {
 
     private void createConfirmButton(Action action, Color color, String description) {
         confirmContainer.getChildren().clear();
-
         BetterButton confirmBtn = new BetterButton("Confirm");
         confirmBtn.setPrefHeight(10);
-        // Top-bar button uses the same color so the user can associate them
         confirmBtn.setSuccessStyle();
-
         confirmBtn.setOnAction(e -> showConfirmPopup(action, color, description));
-
         confirmContainer.getChildren().addAll(confirmBtn);
     }
 
@@ -1602,12 +1857,17 @@ public class Game {
         // ---- NEW: Attack branch ----
         if (action instanceof AttackAction atk) {
             FieldUnit u = getUnitFromName(atk.getActor());
-            if (atk.slotNumber != -1) {
-            showAttackConfirmPopup(atk,
-                    atk.getActionCombatProfile(), (Weapon) u.getSlots().get(atk.slotNumber).getItem(), u.getSlots().get(atk.slotNumber));}
-            else showAttackConfirmPopup(atk, atk.getActionCombatProfile(), null, null);
+            Weapon w = null;
+            Slot s = null;
+            if (u != null && atk.slotNumber >= 0 && atk.slotNumber < u.getSlots().size()) {
+                s = u.getSlots().get(atk.slotNumber);
+                if (s.getItem() instanceof Weapon ww) w = ww;
+            }
+            showAttackConfirmPopup(atk, atk.getActionCombatProfile(), w, s);
             return;
         }
+
+
 
         Stage popupStage = newChildStage();
         popupStage.initModality(Modality.APPLICATION_MODAL);
@@ -1674,23 +1934,36 @@ public class Game {
     }
 
 
+
+    private static final String SUPERCONDUCTIVE_SRC = "Superconductive";
+
     private void showAttackConfirmPopup(AttackAction action, AttackProfile profile,
                                         Weapon weapon, Slot slot) {
-
-        //Check to see if it cane be created
-
         if (profile == null) { LogMessage("No attack profile selected."); return; }
         FieldUnit attacker = getUnitFromName(action.getActor());
         if (attacker == null || !attacker.isExists()) return;
 
-        //POP UP BUILDER
+        final Weapon.Tech tech = (weapon != null && weapon.getCurrentTech() != null)
+                ? weapon.getCurrentTech() : Weapon.Tech.NONE;
+        final int tn = AttackAction.clampTN(attacker.getAccuracy());
 
+        // Costs always come from the profile
+        action.staminaCost = profile.Stamina;
+        action.ATPCost     = profile.ATP;
+
+        final boolean showAmmo = weapon != null && (weapon.isRanged() || profile.AmmoCost > 0);
+        final boolean canAfford =
+                attacker.getStamina() >= profile.Stamina
+                        && attacker.getATP() >= profile.ATP
+                        && (!showAmmo || weapon.getAmmo() >= profile.AmmoCost);
+
+        // ---------- Window ----------
         Stage popupStage = newChildStage();
         popupStage.initModality(Modality.APPLICATION_MODAL);
         popupStage.setTitle("Confirm Attack");
         popupStage.initStyle(StageStyle.TRANSPARENT);
 
-        VBox content = new VBox(12);
+        VBox content = new VBox(10);
         content.setPadding(new Insets(20));
         content.setAlignment(Pos.CENTER);
         content.setStyle(
@@ -1701,13 +1974,13 @@ public class Game {
                         "-fx-background-radius: 8;" +
                         "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.4), 12, 0, 0, 4);");
 
-        Scene scene = new Scene(content, 540, 600);
+        Scene scene = new Scene(content, 560, 700);
         scene.setFill(Color.TRANSPARENT);
 
         Label titleLabel = new Label("Confirm Attack");
         titleLabel.setStyle("-fx-font-size: 16px; -fx-font-weight: bold;");
 
-        // ---- Target line (no start/end position) ----
+        // ---------- Targets ----------
         StringBuilder targetText = new StringBuilder();
         for (int i = 0; i < action.hitPositions.size(); i++) {
             AttackAction.Hit h = action.hitPositions.get(i);
@@ -1718,31 +1991,31 @@ public class Game {
             if (hU != null) targetText.append(hU.getName()).append("  ").append(CordsToText(hx, hy));
             else            targetText.append(CordsToText(hx, hy));
         }
-
         Label targetLabel = new Label("Target: " + targetText);
+        targetLabel.setWrapText(true);
+        targetLabel.setMaxWidth(500);
         targetLabel.setStyle("-fx-font-size: 13px; -fx-text-fill: #333;");
 
-        // ---- Compact profile summary ----
         Label profileLabel = new Label(describeProfileForPopup(profile, weapon));
-        profileLabel.setStyle("-fx-font-size: 15px; -fx-font-weight: bold; -fx-text-fill: #1a1a4d;");
+        profileLabel.setWrapText(true);
+        profileLabel.setMaxWidth(500);
+        profileLabel.setStyle("-fx-font-size: 14px; -fx-font-weight: bold; -fx-text-fill: #1a1a4d;");
 
-        // ---- Cost row (Stamina / ATP / Ammo) ----
+        // ---------- Costs ----------
         HBox costRow = new HBox(20);
         costRow.setAlignment(Pos.CENTER);
         costRow.setStyle("-fx-background-color: #f4f4f4; -fx-padding: 10; " +
                 "-fx-border-color: #cccccc; -fx-border-width: 1;");
 
-        Label staminaCost = new Label("Stamina: " + profile.Stamina);
+        Label staminaCost = new Label("Stamina: " + profile.Stamina + " (have " + attacker.getStamina() + ")");
         staminaCost.setStyle("-fx-font-weight: bold; -fx-font-size: 13px; -fx-text-fill: " +
                 (attacker.getStamina() < profile.Stamina ? "#b00020" : "#2e7d32") + ";");
-        costRow.getChildren().add(staminaCost);
-
-        Label atpCost = new Label("ATP: " + profile.ATP);
+        Label atpCost = new Label("ATP: " + profile.ATP + " (have " + attacker.getATP() + ")");
         atpCost.setStyle("-fx-font-weight: bold; -fx-font-size: 13px; -fx-text-fill: " +
                 (attacker.getATP() < profile.ATP ? "#b00020" : "#2e7d32") + ";");
-        costRow.getChildren().add(atpCost);
+        costRow.getChildren().addAll(staminaCost, atpCost);
 
-        if (weapon != null && (weapon.isRanged() || profile.AmmoCost > 0)) {
+        if (showAmmo) {
             int remaining = weapon.getAmmo() - profile.AmmoCost;
             Label ammoCost = new Label("Ammo: " + profile.AmmoCost
                     + "  (" + weapon.getAmmo() + "/" + weapon.getMaxAmmo() + ")");
@@ -1751,35 +2024,75 @@ public class Game {
             costRow.getChildren().add(ammoCost);
         }
 
-        // ---- Results panel ----
-        VBox resultsBox = new VBox(8);
+        // ---------- Superconductive choice (only tech with an on-hit effect) ----------
+        final String OPT_ATTACK = "-10 to the target's next Attack Test";
+        final String OPT_GUARD  = "-10 to the target's next Guard attempt";
+        final String OPT_NONE   = "No effect";
+
+        ComboBox<String> onHitCombo = new ComboBox<>();
+        onHitCombo.getItems().addAll(OPT_ATTACK, OPT_GUARD, OPT_NONE);
+        onHitCombo.setValue(OPT_ATTACK);
+        onHitCombo.setPrefWidth(300);
+
+        // Writes the current choice into the profile (replaces any earlier Superconductive entry).
+        Runnable syncOnHit = () -> {
+            profile.onHitEffects.removeIf(fx -> fx.getName().startsWith(SUPERCONDUCTIVE_SRC));
+            if (tech != Weapon.Tech.SUPERCONDUCTIVE) {
+                return;
+            }
+            String v = onHitCombo.getValue();
+            if (OPT_ATTACK.equals(v))     profile.onHitEffects.add(Effect.superconductiveAttack());
+            else if (OPT_GUARD.equals(v)) profile.onHitEffects.add(Effect.superconductiveGuard());
+        };
+
+        onHitCombo.valueProperty().addListener((o, a, b) -> syncOnHit.run());
+        syncOnHit.run();
+
+        HBox onHitRow = new HBox(10, new Label("Superconductive (on damage):"), onHitCombo);
+        onHitRow.setAlignment(Pos.CENTER);
+
+        // ---------- Results ----------
+        VBox resultsBox = new VBox(6);
         resultsBox.setAlignment(Pos.CENTER);
         resultsBox.setStyle("-fx-background-color: #fafafa; -fx-padding: 14; " +
                 "-fx-border-color: #dddddd; -fx-border-width: 1;");
-        resultsBox.setMinHeight(180);
+        resultsBox.setMinHeight(200);
 
         Label accuracyHeader = new Label("Accuracy");
         accuracyHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #666;");
-        Label accuracyResult = new Label("Target: " + attacker.getAccuracy());
+        Label accuracyResult = new Label("Target: " + tn);
         accuracyResult.setStyle("-fx-font-size: 20px; -fx-font-weight: bold; -fx-text-fill: #333;");
+        Label dosLabel = new Label("");
+        dosLabel.setStyle("-fx-font-size: 13px; -fx-text-fill: #333;");
 
         Label damageHeader = new Label("Damage");
         damageHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #666;");
         Label damageResult = new Label("—");
         damageResult.setStyle("-fx-font-size: 20px; -fx-font-weight: bold; -fx-text-fill: #333;");
+        Label damageBreakdown = new Label("");
+        damageBreakdown.setStyle("-fx-font-size: 12px; -fx-text-fill: #555;");
+
+        Label techNote = new Label("");
+        techNote.setWrapText(true);
+        techNote.setMaxWidth(480);
+        techNote.setStyle("-fx-font-size: 12px; -fx-text-fill: #1a1a4d; -fx-font-weight: bold;");
 
         Label areaNote = new Label("");
         areaNote.setStyle("-fx-font-size: 12px; -fx-text-fill: #b00020; -fx-font-style: italic;");
         areaNote.setWrapText(true);
-        areaNote.setMaxWidth(460);
+        areaNote.setMaxWidth(480);
+        if (profile.AreaType == -2)
+            areaNote.setText("Line attack: hits everything along the line. Half damage if it misses or is guarded.");
+        else if (profile.AreaType >= 0)
+            areaNote.setText("Area " + profile.AreaType + " attack: hits allies too. Half damage if it misses or is guarded.");
 
         resultsBox.getChildren().addAll(
-                accuracyHeader, accuracyResult,
+                accuracyHeader, accuracyResult, dosLabel,
                 new Separator(),
-                damageHeader, damageResult,
-                areaNote);
+                damageHeader, damageResult, damageBreakdown,
+                techNote, areaNote);
 
-        // ---- Buttons ----
+        // ---------- Buttons ----------
         BetterButton rollBtn = new BetterButton("ROLL ATTACK");
         rollBtn.setPrimaryStyle();
         rollBtn.setPrefWidth(220);
@@ -1795,17 +2108,70 @@ public class Game {
         cancelBtn.setDangerStyle();
         cancelBtn.setOnAction(e -> popupStage.close());
 
+        // Shows whatever is stored in the action right now (also used when the popup is reopened).
+        Runnable refresh = () -> {
+            if (action.rolledHitValue <= 0) return;
+            boolean hit = action.isRollSuccess();
+            int dos = action.getDos();
 
+            accuracyResult.setText("Rolled " + action.rolledHitValue + "  vs  " + action.accuracyTN
+                    + (hit ? "   HIT" : "   MISS"));
+            accuracyResult.setStyle("-fx-font-size: 20px; -fx-font-weight: bold; -fx-text-fill: "
+                    + (hit ? "#2e7d32" : "#b00020") + ";");
+            dosLabel.setText(hit ? dos + " Degrees of Success" : "No Degrees of Success");
+
+            // Tech bonuses are derived from the DoS, not stored anywhere
+            int gaussBonus = (tech == Weapon.Tech.GAUSS)  ? Math.min(dos, 4) : 0;
+            int chainStrain = (tech == Weapon.Tech.CHAIN) ? Math.min(dos, 3) : 0;
+
+            int basePower = profile.Power - gaussBonus;                 // Power without the Gauss bonus
+            int diceTotal = action.rolledDamage - profile.Power;        // just the dice
+
+            damageResult.setText(String.valueOf(action.rolledDamage));
+            StringBuilder bd = new StringBuilder();
+            bd.append(profile.Dice).append("d").append(profile.Dicepower).append(" = ").append(diceTotal);
+            if (basePower != 0) bd.append("  ").append(basePower > 0 ? "+ " : "- ")
+                    .append(Math.abs(basePower)).append(" power");
+            if (gaussBonus > 0) bd.append("  + ").append(gaussBonus).append(" Gauss");
+            damageBreakdown.setText(bd.toString());
+
+            StringBuilder tn2 = new StringBuilder();
+            if (tech == Weapon.Tech.GAUSS)
+                tn2.append("Gauss: +").append(gaussBonus).append(" damage (1 per DoS, max +4).");
+            if (tech == Weapon.Tech.CHAIN)
+                tn2.append("Chain: +").append(chainStrain)
+                        .append(" Strain (1 per DoS, max 3), total Strain ").append(profile.Strain)
+                        .append(", applied even if the target guards.");
+            if (tech == Weapon.Tech.SUPERCONDUCTIVE)
+                tn2.append("Superconductive: the chosen effect applies to each target that takes damage.");
+            techNote.setText(tn2.toString());
+
+            rollBtn.setDisable(true);
+            cancelBtn.setDisable(true);
+            onHitCombo.setDisable(false);
+            proceedBtn.setDisable(!canAfford);
+        };
 
         rollBtn.setOnAction(e -> {
+            if (action.rolledHitValue > 0) return;        // one roll per action
+            java.util.concurrent.ThreadLocalRandom rng = java.util.concurrent.ThreadLocalRandom.current();
 
+            action.accuracyTN     = tn;
+            action.rolledHitValue = rng.nextInt(1, 101);
+
+            int diceTotal = 0;
+            for (int i = 0; i < profile.Dice; i++) diceTotal += rng.nextInt(1, profile.Dicepower + 1);
+
+            profile.resolveTechnology(tech, action.getDos());
+            action.rolledDamage = diceTotal + profile.Power;
+
+            refresh.run();
         });
 
         proceedBtn.setOnAction(e -> {
-          //  action.rolledValue    = rolledAttack[0];
-          //  action.rolledDamage   = rolledDamage[0];
-          //  action.finalDamage    = finalDamage[0];
-          //  action.techDamageBonus = techBonusOut[0];
+            if (action.rolledHitValue <= 0 || !canAfford) return;
+            syncOnHit.run();
+            proceedBtn.setDisable(true);
             SendAction(action);
             clearAttackVisualization();
             confirmAction = null;
@@ -1813,19 +2179,21 @@ public class Game {
             popupStage.close();
         });
 
+        if (!canAfford) {
+            rollBtn.setDisable(true);
+            areaNote.setText("Not enough resources for this attack.");
+        }
+        if (action.rolledHitValue > 0) refresh.run();     // popup reopened after a roll
+
         HBox btnBox = new HBox(10, cancelBtn, proceedBtn);
         btnBox.setAlignment(Pos.CENTER);
 
-        content.getChildren().addAll(
-                titleLabel, targetLabel, profileLabel,
-                costRow, rollBtn, resultsBox, btnBox);
+        content.getChildren().addAll(titleLabel, targetLabel, profileLabel, costRow);
+        if (tech == Weapon.Tech.SUPERCONDUCTIVE) content.getChildren().add(onHitRow);
+        content.getChildren().addAll(rollBtn, resultsBox, btnBox);
 
-        // Draggable borderless window
         final double[] dragOffset = new double[2];
-        content.setOnMousePressed(e -> {
-            dragOffset[0] = e.getSceneX();
-            dragOffset[1] = e.getSceneY();
-        });
+        content.setOnMousePressed(e -> { dragOffset[0] = e.getSceneX(); dragOffset[1] = e.getSceneY(); });
         content.setOnMouseDragged(e -> {
             popupStage.setX(e.getScreenX() - dragOffset[0]);
             popupStage.setY(e.getScreenY() - dragOffset[1]);
@@ -1834,7 +2202,6 @@ public class Game {
         popupStage.setScene(scene);
         popupStage.show();
     }
-
     /**
      * Compact one-line profile summary for the attack popup.
      * Shows dice, power, penetration and a tech marker where relevant.
@@ -1856,7 +2223,9 @@ public class Game {
 
         if (weapon != null) {
             switch (weapon.getCurrentTech()) {
-                case GAUSS -> sb.append(" | +d (Gauss)");
+                case GAUSS          -> sb.append(" | Gauss (+1 dmg/DoS, max +4)");
+                case CHAIN          -> sb.append(" | Chain (1 Strain/DoS, max 3)");
+                case SUPERCONDUCTIVE-> sb.append(" | Superconductive");
                 case POLYTHERMIC -> { if (weapon.isActiveTech()) sb.append("   |   OVERHEAT"); }
                 case N2SHELL  -> { if (weapon.isActiveTech()) sb.append("   |   N2 Shell Active"); }
                 case MASER    -> { if (weapon.isActiveTech()) sb.append("   |   Maser Active"); }
@@ -3183,6 +3552,8 @@ public class Game {
         content.setAlignment(Pos.CENTER);
 
         Label descLabel = new Label(current.getDescription());
+        descLabel.setWrapText(true);
+        descLabel.setMaxWidth(440);
         descLabel.setStyle("-fx-font-size: 14px; -fx-font-weight: bold;");
         content.getChildren().add(descLabel);
 
@@ -3203,6 +3574,9 @@ public class Game {
             case PLAYER_SETUP:
                 specificContent = buildPlayerSetupContent(confirmBtn, popupStage, currentAction);
                 break;
+            case DEFENCE:
+                specificContent = buildDefenceContent(confirmBtn, popupStage, currentAction, current);
+                break;
             default:
                 // For other types, just show a message and confirm
                 specificContent = new Label("No specific actions for this reaction type.");
@@ -3215,7 +3589,7 @@ public class Game {
 
         // Confirm button logic: it will be enabled/disabled by the content builders
         confirmBtn.setPrimaryStyle();
-        confirmBtn.setDisable(true); // initially disabled, enabled when valid
+        confirmBtn.setDisable(current.getReactionType() != ReactionType.DEFENCE);
 
         // TODO SKIPPABLE
      /*   if (current.isSkippable()) {
@@ -3236,7 +3610,8 @@ public class Game {
         btnBox.getChildren().add(confirmBtn);
         content.getChildren().add(btnBox);
 
-        Scene scene = new Scene(content, 400, 300);
+        boolean defenceUi = current.getReactionType() == ReactionType.DEFENCE;
+        Scene scene = new Scene(content, defenceUi ? 480 : 400, defenceUi ? 560 : 300);
         popupStage.setScene(scene);
         popupStage.setOnCloseRequest(e -> {
             if (!current.isSkippable()) {
@@ -3249,6 +3624,106 @@ public class Game {
         });
         popupStage.show();
         popupShowing = false;
+    }
+
+
+    private Node buildDefenceContent(Button proceedBtn, Stage popupStage, Action cause, QueuePosition reactionPos) {
+        VBox root = new VBox(10);
+        root.setPadding(new Insets(5));
+
+        FieldUnit defender = getUnitFromName(reactionPos.getUnitID());
+        if (!(cause instanceof AttackAction atk) || atk.getActionCombatProfile() == null
+                || defender == null || !defender.isExists()) {
+            LogError("ERROR - defence popup without a valid attack\n");
+            root.getChildren().add(new Label("Nothing to defend against."));
+            return root;
+        }
+        final AttackProfile profile = atk.getActionCombatProfile();
+        final boolean reduced = isReducedByMiss(atk);
+        final int incoming = reduced ? atk.rolledDamage / 2 : atk.rolledDamage;
+
+        // ---------- Incoming attack ----------
+        Label inHeader = new Label("Incoming attack");
+        inHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #8b0000;");
+        Label dmg = new Label("Damage: " + incoming + (reduced ? "  (halved, the attack missed)" : ""));
+        Label pen = new Label("Penetration: " + profile.Penetration);
+        Label strain = new Label("Strain: " + profile.Strain);
+        VBox incomingBox = new VBox(3, inHeader, dmg, pen, strain);
+        incomingBox.setStyle("-fx-background-color: #fff0f0; -fx-padding: 8; -fx-border-color: #d99; -fx-border-width: 1;");
+
+        // ---------- Your stats ----------
+        Label youHeader = new Label("Your defences: " + defender.getName());
+        youHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #1a1a4d;");
+        Label reflexes = new Label("Reflexes: " + defender.getReflexes());
+        Label guardState = new Label("Guard: " + (defender.usedGuard() ? "already used this round" : "available"));
+        Label atp = new Label("ATP: " + defender.getATP() + " / " + defender.getMaxATP());
+        Label toughness = new Label("Toughness: " + defender.getToughness() + " / " + defender.getMaxToughness());
+        Label armorLabel = new Label();
+        Label expected = new Label();
+        VBox statsBox = new VBox(3, youHeader, reflexes, guardState, atp, toughness, armorLabel, expected);
+        statsBox.setStyle("-fx-background-color: #f4f4f4; -fx-padding: 8; -fx-border-color: #ccc; -fx-border-width: 1;");
+
+        // ---------- Layered Field ----------
+        CheckBox layered = new CheckBox("Use Layered Field  (costs 1 ATP, +" + LAYERED_FIELD_ARMOR + " Armor)");
+        layered.setDisable(defender.getATP() < 1);
+
+        Runnable updateArmor = () -> {
+            int base = defender.getArmor();
+            boolean on = layered.isSelected();
+            int total = base + (on ? LAYERED_FIELD_ARMOR : 0);
+            armorLabel.setText(on ? "Armor: " + base + " + " + LAYERED_FIELD_ARMOR + " = " + total
+                    : "Armor: " + base);
+            armorLabel.setStyle(on ? "-fx-text-fill: #2e7d32; -fx-font-weight: bold;" : "");
+            int through = Math.max(0, incoming - Math.max(0, total - profile.Penetration));
+            expected.setText("Damage you would take if unguarded: " + through);
+        };
+        layered.selectedProperty().addListener((o, a, b) -> updateArmor.run());
+        updateArmor.run();
+
+        // ---------- Guard ----------
+        // TODO: Guard is disabled for a missed Area/Line because it cannot reduce the half damage any
+        // further. If the rules change (e.g. Guard should still negate it), remove `reduced` here AND in
+        // processDefenceAction (guardWorks) and processAttackAction (canReact).
+        final boolean guardBlocked = defender.usedGuard() || reduced;
+        final int guardTN = AttackAction.clampTN(defender.getReflexes());
+        final boolean[] rolled = {false};
+        final int[] roll = {0};
+
+        BetterButton guardBtn = new BetterButton("Roll Guard (1d100 vs " + guardTN + ")");
+        guardBtn.setPrimaryStyle();
+        guardBtn.setDisable(guardBlocked);
+        Label guardResult = new Label(reduced ? "Guard cannot reduce the damage of a missed area/line attack."
+                : defender.usedGuard() ? "Guard already used." : "");
+        guardResult.setWrapText(true);
+
+        guardBtn.setOnAction(e -> {
+            if (rolled[0]) return;
+            roll[0] = java.util.concurrent.ThreadLocalRandom.current().nextInt(1, 101);
+            rolled[0] = true;
+            boolean ok = AttackAction.rollSucceeds(roll[0], guardTN);
+            guardResult.setText("Rolled " + roll[0] + " vs " + guardTN + (ok ? "  -  GUARD SUCCESS, no damage" : "  -  guard failed"));
+            guardResult.setStyle("-fx-font-weight: bold; -fx-text-fill: " + (ok ? "#2e7d32" : "#b00020") + ";");
+            guardBtn.setDisable(true);
+        });
+
+        // ---------- Proceed ----------
+        proceedBtn.setText("Proceed");
+        proceedBtn.setDisable(false);
+        proceedBtn.setOnAction(e -> {
+            if (queue.currentPosition() != reactionPos) { popupStage.close(); return; }   // stale popup
+            proceedBtn.setDisable(true);
+            DefenceAction d = new DefenceAction(currentActionNumber + 1, defender.getName());
+            d.layeredField = layered.isSelected() && defender.getATP() > 0;
+            d.ATPCost = d.layeredField ? 1 : 0;
+            d.guardRolled = rolled[0];
+            d.guardRoll = roll[0];
+            d.guardTN = guardTN;
+            SendAction(d);
+            popupStage.close();
+        });
+
+        root.getChildren().addAll(incomingBox, statsBox, layered, new Separator(), guardBtn, guardResult);
+        return root;
     }
 
     private boolean nameIsPicked(String name, GameState gamestate1) {

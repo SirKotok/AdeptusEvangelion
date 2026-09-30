@@ -11,6 +11,9 @@ import java.util.List;
 
 public class AttackAction extends Action {
 
+    public boolean isRollSuccess() { return rollSucceeds(rolledHitValue, accuracyTN); }
+    public int getDos()            { return dosFor(rolledHitValue, accuracyTN); }
+
     /** A single sector hit by the attack. */
     public static class Hit implements Serializable {
         public final int deltax;
@@ -24,6 +27,22 @@ public class AttackAction extends Action {
 
     public boolean isAttackOfOpportunity = false;
 
+    /** Rules: TN is clamped to 1..99. */
+    public static int clampTN(int tn) { return Math.max(1, Math.min(99, tn)); }
+
+    /** A 1 always succeeds, a 100 always fails, otherwise roll <= TN. */
+    public static boolean rollSucceeds(int roll, int tn) {
+        if (roll <= 0) return false;
+        if (roll == 1) return true;
+        if (roll >= 100) return false;
+        return roll <= clampTN(tn);
+    }
+
+    /** 1 DoS per full 10 the roll is beneath the TN. 0 on a miss. */
+    public static int dosFor(int roll, int tn) {
+        if (!rollSucceeds(roll, tn)) return 0;
+        return Math.max(0, (clampTN(tn) - roll) / 10);
+    }
 
     public int slotNumber = -1;
     public AttackProfile actionCombatProfile;

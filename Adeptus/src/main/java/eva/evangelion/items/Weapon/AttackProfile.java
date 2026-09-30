@@ -1,6 +1,7 @@
 package eva.evangelion.items.Weapon;
 
 import eva.evangelion.gameboard.SectorType;
+import eva.evangelion.units.battle.Effect;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -15,6 +16,8 @@ public class AttackProfile implements Serializable {
     public int Penetration = 0;
     public int Strain = 0;
     public int AreaType = -1;
+    public List<Effect> onHitEffects = new ArrayList<>();
+
     public SectorType replace = SectorType.Destroyed;
      // Area = -2 -> Line
      // Area = -1 -> Normal Attack
@@ -31,11 +34,20 @@ public class AttackProfile implements Serializable {
     public void setRanged(boolean ranged) {
         Ranged = ranged;
     }
-
+    /** True once the attacker's Attack Strength has been added to Power (prevents double-adding). */
+    public boolean strengthApplied = false;
 
     /** True if `distance` (Chebyshev) is inside this profile's valid range. */
     public boolean isInRange(int distance) {
         return distance <= MaxRange;
+    }
+
+    public SectorType getReplace() {
+        return replace;
+    }
+
+    public void setReplace(SectorType replace) {
+        this.replace = replace;
     }
 
     public int getStrain() {
@@ -73,20 +85,18 @@ public class AttackProfile implements Serializable {
      *  list is cloned so the copy can be mutated without touching the original. */
     public AttackProfile copy() {
         AttackProfile c = new AttackProfile(
-                this.name,
-                this.Dice,
-                this.Dicepower,
-                this.Power,
-                this.Stamina,
-                this.ATP,
-                this.Ranged,
-                this.ProfileType
-        );
-        c.MinRange = this.MinRange;
-        c.MaxRange = this.MaxRange;
-        c.AmmoCost     = this.AmmoCost;
-        c.Penetration  = this.Penetration;
-        c.AreaType     = this.AreaType;
+                this.name, this.Dice, this.Dicepower, this.Power,
+                this.Stamina, this.ATP, this.Ranged, this.ProfileType);
+        c.MinRange        = this.MinRange;
+        c.MaxRange        = this.MaxRange;
+        c.AmmoCost        = this.AmmoCost;
+        c.Penetration     = this.Penetration;
+        c.Strain          = this.Strain;
+        c.AreaType        = this.AreaType;
+        c.replace         = this.replace;
+        c.multihit        = this.multihit;
+        c.strengthApplied = this.strengthApplied;
+        c.onHitEffects = new ArrayList<>(this.onHitEffects);
         c.AttackProperties = new ArrayList<>(this.AttackProperties);
         return c;
     }
@@ -213,6 +223,17 @@ public class AttackProfile implements Serializable {
         profile.ProfileType = ProfileTypes.FULLAUTO;
         if (profile.Ranged) profile.AmmoCost = 2;
         return profile;
+    }
+
+    public void resolveTechnology(Weapon.Tech tech, int dos) {
+        int TechDamageBonus = 0;
+        if (tech == null) return;
+        if (tech == Weapon.Tech.GAUSS) {
+            TechDamageBonus = Math.min(dos, 4);
+            Power+=TechDamageBonus;
+        } else if (tech == Weapon.Tech.CHAIN) {
+            Strain += Math.min(dos, 3);
+        }
     }
 
 }

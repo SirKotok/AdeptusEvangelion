@@ -168,7 +168,19 @@ public class FieldUnit {
     }
 
     public void addEffect(Effect effect) {
-        if (effect != null) CurrentEffects.add(effect);
+        if (effect == null) return;
+        if (!effect.isStacks() && hasEffect(effect.getName())) return;
+        CurrentEffects.add(effect);
+    }
+
+    public boolean hasEffect(String name) {
+        for (Effect e : CurrentEffects) if (e.getName().equals(name)) return true;
+        return false;
+    }
+
+    /** Can react to an attack at all: has ATP (Layered Field) or an unused Guard. */
+    public boolean canDefend() {
+        return ATP > 0 || !usedGuard;
     }
 
     public void removeEffect(Effect effect) {
