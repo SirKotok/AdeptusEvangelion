@@ -1,5 +1,7 @@
 package eva.evangelion.items.Weapon;
 
+import eva.evangelion.units.battle.Effect;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -20,38 +22,6 @@ public class Weapon extends Item {
 
     public enum Tech {
         NONE, CHAIN, PROGRESSIVE, POLYTHERMIC, SUPERCONDUCTIVE, GAUSS, N2SHELL, MASER, POSITRON;
-
-        /*
-        Chain
-Progressive
-
-Polythermic
-Polythermic weapons use superheated ceramic to burn flesh.  You have +1 Penetration with a Polythermic Weapon.  When you roll damage with a Polythermic Weapon, you can choose to Overheat it, changing your weapon’s damage dice for this attack according to the chart below.  After using this ability, you take a -2 penalty to damage on your next attack with this weapon.  Angels instead take the Damage Penalty for 1 round
-Base Damage
-New Damage
-1d6 or 2d3
-3d3
-1d10 or 2d6
-4d3+1
-
-
-Superconductive
-Superconductive weapons electrify the target, momentarily stunning them.  You have +1 Penetration with a
-Superconductive weapon.  If you deal damage with a Superconductive weapon, you can choose to apply a -10 Penalty to the target’s next Attack Test or a -10 Penalty to the target’s next Guard attempt.  Multiple applications of the same penalty do not stack.
-Ranged Weapon Technologies
-Gauss
-Gauss Weapons use electromagnetism to launch powerful rounds at hypersonic velocity.  You deal an additional +1 damage per DoS on your attack test (maximum +4 Damage).
-N2 Shell
-N2 Shell Weapons detonate with an anti-matter explosion.  Attacks you make with a N2 Weapon have the Area (0) Property.  If the weapon or attack is already Area, you instead gain +1 damage.  You can spend 1 extra Ammo when attacking with an N2 Weapon to increase the Area rating of this weapon by 1.
-Maser
-Maser Weapons fire concentrated beams of microwave energy.  Maser Weapons have +1 Penetration.  By spending 1 extra Ammo, your attack gains the Line property and an additional +1 Penetration.
-Positron
-Positron Weapons pierce all manner of protections with ease.  Positron Weapons have +2 Penetration.
-
-
-        *  */
-
-
 
 
         public Tech nextTech() {
@@ -124,7 +94,33 @@ Positron Weapons pierce all manner of protections with ease.  Positron Weapons h
         ANTI_ARMOR, BALANCED, DOUBLE_EDGED, EXPLOSIVE, EXTRA_AMMO, REINFORCED, THROWING, BAYONET, ENHANCED_BAYONET, TELESCOPIC_SIGHT, AUTO_LOADER
     }
 
+    /** Effects currently on this weapon (e.g. the Overheat penalty). Applied to profiles when they are created. */
+    public List<Effect> effects = new ArrayList<>();
 
+    public List<Effect> getEffects() {
+        if (effects == null) effects = new ArrayList<>();   // weapons saved before this field existed
+        return effects;
+    }
+
+    public void addEffect(Effect e) {
+        if (e == null) return;
+        if (!e.isStacks() && hasEffect(e.getName())) return;
+        getEffects().add(e);
+    }
+
+    public boolean hasEffect(String name) {
+        for (Effect e : getEffects()) if (e.getName().equals(name)) return true;
+        return false;
+    }
+
+    public void clearEffects(Effect.EffectEnd end) {
+        getEffects().removeIf(e -> e.getEffectEnd() == end);
+    }
+
+    /** Weapon effects change the profile's Power (Attack Strength). Called exactly once per freshly built profile. */
+    private void applyWeaponEffects(AttackProfile profile) {
+        for (Effect e : getEffects()) profile.Power += e.getDeltaAttackStrength();
+    }
 
     public enum Hand {
         ONE_HANDED,
@@ -269,7 +265,15 @@ Positron Weapons pierce all manner of protections with ease.  Positron Weapons h
 
   public List<AttackProfile> getWeaponProfiles(Tech tech){
 
-      if (!doesNormalProfiles) return getSpecialProfiles();
+      if (!doesNormalProfiles) {
+          List<AttackProfile> specials = new ArrayList<>();
+          for (AttackProfile p : getSpecialProfiles()) {
+              AttackProfile c = p.copy();
+              applyWeaponEffects(c);
+              specials.add(c);
+          }
+          return specials;
+      }
       List<AttackProfile> profiles = new ArrayList<>();
       profiles.addAll(getNormalProfiles());
       List<AttackProfile> profilesToRemove = new ArrayList<>();
@@ -281,13 +285,9 @@ Positron Weapons pierce all manner of protections with ease.  Positron Weapons h
           if (getBaseArea() != -1 && profile.AreaType == -1) profile.AreaType = getBaseArea(); //set profile to correct area
           profile.Penetration+=getBasePenetration(); //Add basic penetration to profile;
 
-          switch (tech) { // TODO CHAIN, GAUSS
-              case POLYTHERMIC -> {
-                  profile.Penetration++;
-                 //TODO Polythermic handling {if (profile.Dice*profile.Dicepower < 7) {profile.Dice = 3;} else {profile.Dice = 4; profile.Power++;} profile.Dicepower = 3;}
-              }
+          switch (tech) {
+              case POLYTHERMIC, SUPERCONDUCTIVE -> profile.Penetration++;
               case PROGRESSIVE, POSITRON -> profile.Penetration+=2;
-              case SUPERCONDUCTIVE -> profile.Penetration+=1;
               case N2SHELL -> {
                   if (profile.AreaType > -1) {
                    profile.Power++;
@@ -363,6 +363,8 @@ Positron Weapons pierce all manner of protections with ease.  Positron Weapons h
               }
           }
           }
+
+      for (AttackProfile p : profiles) applyWeaponEffects(p);   // normal profiles, once
       // ADDING ADDITIONAL PROFILES:
       for (Customisation custom : Customisations) {
           switch(custom) {
@@ -370,8 +372,11 @@ Positron Weapons pierce all manner of protections with ease.  Positron Weapons h
               case THROWING -> {}
           }
       }
-      for (AttackProfile p : getSpecialProfiles()) profiles.add(p.copy()); //ADDING SPECIAL CUSTOM PROFILES IF THEY EXIST
-
+      for (AttackProfile p : getSpecialProfiles()) {            // special profiles, once
+          AttackProfile c = p.copy();
+          applyWeaponEffects(c);
+          profiles.add(c);
+      }
 
       return profiles;
   }

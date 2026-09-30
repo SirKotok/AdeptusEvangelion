@@ -50,6 +50,30 @@ public class AttackProfile implements Serializable {
         this.replace = replace;
     }
 
+
+    /** True once this profile's dice were changed by Polythermic Overheat (prevents doing it twice). */
+    public boolean overheated = false;
+
+    /** {dice, dicepower, bonusPower}. Max roll of the dice (without Power) below 7 -> 3d3, otherwise 4d3 +1 Power. */
+    public static int[] overheatValues(int dice, int dicepower) {
+        return (dice * dicepower < 7) ? new int[]{3, 3, 0} : new int[]{4, 3, 1};
+    }
+
+    public void applyOverheat() {
+        if (overheated) return;
+        int[] o = overheatValues(Dice, Dicepower);
+        Dice = o[0];
+        Dicepower = o[1];
+        Power += o[2];
+        overheated = true;
+    }
+
+    /** Text for the popup, e.g. "3d3" or "4d3 +1 power". */
+    public String overheatPreview() {
+        int[] o = overheatValues(Dice, Dicepower);
+        return o[0] + "d" + o[1] + (o[2] > 0 ? " +" + o[2] + " power" : "");
+    }
+
     public int getStrain() {
         return Strain;
     }
@@ -94,6 +118,7 @@ public class AttackProfile implements Serializable {
         c.Strain          = this.Strain;
         c.AreaType        = this.AreaType;
         c.replace         = this.replace;
+        c.overheated = this.overheated;
         c.multihit        = this.multihit;
         c.strengthApplied = this.strengthApplied;
         c.onHitEffects = new ArrayList<>(this.onHitEffects);

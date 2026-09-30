@@ -468,7 +468,9 @@ public class Game {
             processDMDeleteUnitAction((DMDeleteUnitAction) action);
         } else if (action instanceof DefenceAction) {
             processDefenceAction((DefenceAction) action);
-        }   else if (action instanceof createDMSetUpPopUpAction) {
+        } else if (action instanceof DealWoundAction) {
+            processDealWoundAction((DealWoundAction) action);
+        } else if (action instanceof createDMSetUpPopUpAction) {
             processCreateDMSetUp((createDMSetUpPopUpAction) action);
         } else if (action instanceof AddPlayerAction) {
             processAddInitialPlayerAction((AddPlayerAction) action);
@@ -484,6 +486,7 @@ public class Game {
         {
             LogMessage("Unknown action type: " + action.getClass().getSimpleName());
         }
+        queueWoundsIfNeeded(action);
         LogMessage(outputQueue());
         LogMessage(outputActions());
         rebuildInventoryTab();
@@ -503,10 +506,58 @@ public class Game {
 // ============================================================
 
     /** Area attacks (and their overlap) also hit the attacker if he stands inside the zone. */
+    //TODO make part of profile?
     private static final boolean AREA_CAN_HIT_ATTACKER = true;
     private static final int LAYERED_FIELD_ARMOR = 3;
 
     private record Cell(int x, int y) {}
+
+
+    /** After every action: any unit at 0 Toughness or less gets an unskippable WOUND reaction turn, right away. */
+    private void queueWoundsIfNeeded(Action cause) {
+        int insertAt = 0;
+        for (FieldUnit u : UnitList) {
+            if (!u.isExists() || u.getToughness() > 0) continue;
+            if (hasPendingWound(u.getName())) continue;
+
+            int sourceNumber = lastDamagedBy.getOrDefault(u.getName(), cause.getActionNumber());
+            Action source = gamestate.getActionfromNumber(sourceNumber);
+            String by = (source instanceof AttackAction a) ? a.getActor() : "an unknown source";
+
+            QueuePosition wound = QueuePosition.createReactionTurn(u.getName(), ReactionType.WOUND,
+                    "Your Toughness has reached 0. You have received a Wound from " + by + ".", sourceNumber);
+            wound.setSkippable(false);
+            queue.addPosition(wound, insertAt++);
+            LogMessage("Added WOUND reaction for " + u.getName() + " (caused by action " + sourceNumber + ")");
+        }
+    }
+
+    private boolean hasPendingWound(String unitName) {
+        for (QueuePosition p : queue.getQueue()) {
+            if (p.isReaction() && p.getReactionType() == ReactionType.WOUND
+                    && p.getActionNumber() < 0 && unitName.equals(p.getUnitID())) return true;
+        }
+        return false;
+    }
+
+    /** For now only restores Toughness. Wound effects come later. */
+    private void processDealWoundAction(DealWoundAction wound) {
+        FieldUnit unit = getUnitFromName(wound.getActor());
+        QueuePosition pos = queue.currentPosition();       // grab BEFORE activateQueue moves on
+
+        if (unit == null || !unit.isExists() || pos == null
+                || pos.getReactionType() != ReactionType.WOUND
+                || !wound.getActor().equals(pos.getUnitID())) {
+            LogError("ERROR - DealWoundAction " + wound.getActionNumber() + " has no matching wound turn\n");
+            activateQueue(wound);
+            return;
+        }
+
+        unit.setToughness(unit.getMaxToughness());         // TODO Wound effects / Wound Level / Hit Location
+        LogMessage(unit.getName() + " received a Wound. Toughness restored to " + unit.getMaxToughness());
+        activateQueue(wound);
+    }
+
 
     private void processAttackAction(AttackAction attack) {
         FieldUnit attacker = getUnitFromName(attack.getActor());
@@ -523,7 +574,6 @@ public class Game {
             LogError("ERROR - accuracy TN mismatch at action " + attack.getActionNumber()
                     + ": action says " + attack.accuracyTN + ", attacker has " + expectedTN + "\n");
         }
-        attacker.ClearEffects(Effect.EffectEnd.ATTACK);   // e.g. Superconductive (Attack)
 
         // ---- 2. Ammo ----
         spendAmmo(attacker, attack, profile);
@@ -547,7 +597,7 @@ public class Game {
             else hitUnits.add(u);
         }
 
-        for (FieldUnit missed : missedUnits) {
+        for (FieldUnit missed : missedUnits) { //TODO show only when attack action is the last action in the processing queue, no need to show if it moved past it (initial load doesnt fully help here, need replacement)
             LogMessage(attacker.getName() + " missed " + missed.getName());
             if (!initialLoad && missed.getName().equals(currentPlayer)) {
                 showAttackMissedPopup(attacker.getName());
@@ -566,12 +616,12 @@ public class Game {
             // Guard is disabled against a missed Area/Line, so then only Layered Field can help.
             boolean canReact = target.canDefend() && (target.getATP() > 0 || !halved);
             if (!canReact) {
-                processHit(attack, attacker, target);
+                processHit(attack, attacker, target, 0);
                 continue;
             }
-            String desc = "You have been shot at by " + attacker.getName() + " and they hit"
-                    + (halved ? " (missed, but the " + (profile.AreaType == -2 ? "line" : "area")
-                    + " still hits you for half damage)" : "")
+            String desc = "You have been "+(attack.actionCombatProfile.isRanged() ? "shot at by " : "hit in melee by ") + attacker.getName() + " and they"
+                    + (halved ? " missed, but the " + (profile.AreaType == -2 ? "line" : "area")
+                    + " attack still deals half damage" : " hit")
                     + ", choose your defence option.";
             QueuePosition reaction = QueuePosition.createReactionTurn(
                     target.getName(), ReactionType.DEFENCE, desc, attack.getActionNumber());
@@ -579,6 +629,10 @@ public class Game {
             queue.addPosition(reaction, insertAt++);
             LogMessage("Added DEFENCE reaction for " + target.getName());
         }
+
+        Weapon usedWeapon = getUsedWeapon(attacker, attack);
+        attacker.ClearEffects(Effect.EffectEnd.ATTACK, usedWeapon);   // also clears ATTACK effects on the weapon used
+        applySelfAttackEffectsToUnitorWeapon(attacker, attack, usedWeapon);               // new penalties go on AFTER the clearing
 
         QueuePosition attackerTurn = new QueuePosition(attacker.getName(), false);
         attackerTurn.setActionNumber(-1);
@@ -608,16 +662,12 @@ public class Game {
         Action reactedTo = gamestate.getActionfromNumber(pos.getReactionTo());
         if (reactedTo instanceof AttackAction atk) {
             FieldUnit attacker = getUnitFromName(atk.getActor());
-            boolean guardWorks = def.isGuardSuccess()
+            int bonusArmor = def.layeredField ? LAYERED_FIELD_ARMOR : 0;
+            boolean guardSuccess = def.isGuardSuccess()
                     && !isReducedByMiss(atk)
                     && canBeDefendedAgainst(atk.getActionCombatProfile());
-            if (guardWorks) {
-                LogMessage(defender.getName() + " guarded the attack from " + atk.getActor() + " (rolled "
-                        + def.guardRoll + " vs " + def.guardTN + ")");
-                // TODO Chain: Strain is applied even when the target guards (FieldUnit has no Strain yet)
-            } else {
-                processHit(atk, attacker, defender, def.layeredField ? LAYERED_FIELD_ARMOR : 0);
-            }
+            int roll = def.guardRolled ? def.guardRoll : 0;
+            processHit(atk, attacker, defender, bonusArmor, guardSuccess, roll, def.guardTN);   // Strain goes through either way
         } else {
             LogError("ERROR - DefenceAction is not reacting to an AttackAction\n");
         }
@@ -625,43 +675,84 @@ public class Game {
         activateQueue(def);    // just move on, the queue is not changed
     }
 
-    private void processHit(AttackAction attack, FieldUnit attacker, FieldUnit defender) {
-        processHit(attack, attacker, defender, 0);
-    }
 
     /**
      * Damage -> (halved if Area/Line missed) -> Armor (+ bonus) reduced by Penetration -> Toughness.
      * Then every on-hit effect of the profile is copied onto the defender if damage got through.
      * The attacker is currently unused.
      */
-    private void processHit(AttackAction attack, FieldUnit attacker, FieldUnit defender, int bonusArmor) {
+    /** Everything that happened to one defender in one hit. Used for logs and info popups. */
+    private record HitResult(String attackerName, boolean areaOrLine, boolean halved, boolean guarded,
+                             int rawDamage, int damageAfterHalving,
+                             int baseArmor, int bonusArmor, int penetration, int armorAfterPen,
+                             int blockedByArmor, int wouldHaveDealt, int damageDealt, int strain,
+                             int toughnessBefore, int toughnessAfter, int maxToughness,
+                             int guardRoll, int guardTN, List<String> effectsGained) {}
+
+    /** Defender name -> number of the attack that last took Toughness from it (used for Wound reactions). */
+    private final Map<String, Integer> lastDamagedBy = new HashMap<>();
+
+    private HitResult processHit(AttackAction attack, FieldUnit attacker, FieldUnit defender, int bonusArmor) {
+        return processHit(attack, attacker, defender, bonusArmor, false, 0, 0);
+    }
+
+    /**
+     * Damage -> (halved if Area/Line missed) -> Armor (+bonus) reduced by Penetration -> Toughness.
+     * Strain is added on top: it ignores Armor, is not halved and is applied even if the defender guarded.
+     * On-hit effects are applied only if real damage got through (Strain alone does not count).
+     * If guarded, the damage is still calculated (for the info popup) but not dealt.
+     */
+    private HitResult processHit(AttackAction attack, FieldUnit attacker, FieldUnit defender,
+                                 int bonusArmor, boolean guarded, int guardRoll, int guardTN) {
         AttackProfile profile = attack.getActionCombatProfile();
-        if (profile == null || defender == null || !defender.isExists()) return;
+        if (profile == null || defender == null || !defender.isExists()) return null;
 
+        boolean areaOrLine = profile.AreaType != -1;
+        boolean halved = isReducedByMiss(attack) || (areaOrLine && guarded);   // never halved twice
+        boolean negated = guarded && !areaOrLine;                              // only normal attacks are fully stopped
         int raw = attack.rolledDamage;
-        if (isReducedByMiss(attack)) raw /= 2;               // before armor
+        int afterHalf = halved ? raw / 2 : raw;
 
-        int armor = Math.max(0, defender.getArmor() + bonusArmor - profile.Penetration);
-        int damage = Math.max(0, raw - armor);
+        int baseArmor = defender.getArmor();
+        int armorAfterPen = Math.max(0, baseArmor + bonusArmor - profile.Penetration);
+        int blocked = Math.min(afterHalf, armorAfterPen);
+        int wouldHave = afterHalf - blocked;
+        int damage = negated ? 0 : wouldHave;
+        int strain = Math.max(0, profile.Strain);
 
-        int toughnessBefore = defender.getToughness();
-        defender.DealToughnessDamage(damage);
-        int overflow = Math.max(0, damage - toughnessBefore);
-
-        LogMessage(defender.getName() + " takes " + damage + " damage (" + raw + " raw, armor after penetration "
-                + armor + "). Toughness " + toughnessBefore + " -> " + defender.getToughness());
-        if (overflow > 0) {
-            LogMessage(defender.getName() + " has " + overflow + " overflow damage");
-            // TODO Wound trigger
+        int before = defender.getToughness();
+        int totalLoss = damage + strain;
+        if (totalLoss > 0) {
+            defender.DealToughnessDamage(totalLoss);
+            lastDamagedBy.put(defender.getName(), attack.getActionNumber());
         }
-        // TODO Strain (profile.Strain) once FieldUnit has a Strain stat
+        int after = defender.getToughness();
 
+        List<String> gained = new ArrayList<>();
         if (damage > 0) {
             for (Effect e : profile.onHitEffects) {
-                defender.addEffect(e.copy());     // FieldUnit.addEffect skips non-stacking duplicates
-                LogMessage(defender.getName() + " gains " + e.getName());
+                defender.addEffect(e.copy());         // FieldUnit.addEffect skips non-stacking duplicates
+                gained.add(e.getName());
             }
         }
+
+        String attackerName = attacker != null ? attacker.getName() : attack.getActor();
+        LogMessage(defender.getName() + (negated ? " guarded" : " is hit") + ": " + raw + " raw"
+                + (halved ? " (halved to " + afterHalf + ")" : "") + ", armor after penetration " + armorAfterPen
+                + ", " + damage + " damage + " + strain + " strain. Toughness " + before + " -> " + after);
+        if (totalLoss > before) LogMessage(defender.getName() + " has " + (totalLoss - before) + " overflow damage");
+        for (String g : gained) LogMessage(defender.getName() + " gains " + g);
+
+        HitResult result = new HitResult(attackerName, profile.AreaType != -1, halved, guarded,
+                raw, afterHalf, baseArmor, bonusArmor, profile.Penetration, armorAfterPen,
+                blocked, wouldHave, damage, strain,
+                before, after, defender.getMaxToughness(), guardRoll, guardTN, gained);
+
+        if (shouldShowInfoFor(defender)) {
+            if (negated) showGuardSuccessPopup(result);
+            else showHitPopup(result);
+        }
+        return result;
     }
 
 
@@ -691,6 +782,25 @@ public class Game {
         int left = w.getAmmo() - profile.AmmoCost;
         if (left < 0) LogError("ERROR = AMMO LESS THAN 0 AT " + attack.getActionNumber() + "\n");
         w.setAmmo(Math.max(0, left));
+    }
+
+    private Weapon getUsedWeapon(FieldUnit attacker, AttackAction attack) {
+        List<Slot> slots = attacker.getSlots();
+        if (slots == null || attack.slotNumber < 0 || attack.slotNumber >= slots.size()) return null;
+        return slots.get(attack.slotNumber).getItem() instanceof Weapon w ? w : null;
+    }
+
+    /** Self effects go on the weapon that was used, or on the unit if it attacked without a weapon. */
+    private void applySelfAttackEffectsToUnitorWeapon(FieldUnit attacker, AttackAction attack, Weapon usedWeapon) {
+        for (Effect e : attack.getSelfEffects()) {
+            if (usedWeapon != null) {
+                usedWeapon.addEffect(e.copy());
+                LogMessage(usedWeapon.getName() + " (" + attacker.getName() + ") gains " + e.getName());
+            } else {
+                attacker.addEffect(e.copy());
+                LogMessage(attacker.getName() + " gains " + e.getName());
+            }
+        }
     }
 
     /**
@@ -785,7 +895,117 @@ public class Game {
         s.show();
     }
 
+    /** Only this player's own client shows it, and never while replaying an old game. */
+    private boolean shouldShowInfoFor(FieldUnit unit) {
+        return !closed && !initialLoad && unit != null && unit.getName().equals(currentPlayer);
+    }
 
+    private void showHitPopup(HitResult r) {
+        String head;
+        if (r.areaOrLine() && r.guarded()) {
+            head = "You guarded against " + r.attackerName() + "'s area/line attack, but it still hit you for half damage.";
+        } else if (r.areaOrLine() && r.halved()) {
+            head = "You were caught by " + r.attackerName() + "'s attack. It missed, but still hit you for half damage.";
+        } else {
+            head = "You were hit by " + r.attackerName() + ".";
+        }
+
+        List<String[]> rows = new ArrayList<>();
+        rows.add(new String[]{"Damage rolled", String.valueOf(r.rawDamage())});
+        if (r.halved()) {
+            rows.add(new String[]{r.guarded() ? "Reduced by your successful Guard (half damage)"
+                    : "Reduced by the miss (half damage)",
+                    r.rawDamage() + " → " + r.damageAfterHalving()
+                            + "   (-" + (r.rawDamage() - r.damageAfterHalving()) + ")"});
+        }
+        rows.add(new String[]{"Your Armor", r.baseArmor() + (r.bonusArmor() > 0 ? " + " + r.bonusArmor() + " Layered Field" : "")});
+        rows.add(new String[]{"Penetration", r.penetration() + "   (Armor after penetration: " + r.armorAfterPen() + ")"});
+        rows.add(new String[]{"Blocked by Armor", String.valueOf(r.blockedByArmor())});
+
+        if (r.guardRoll() > 0) {
+            rows.add(new String[]{"Guard", (r.guarded() ? "success" : "failed")
+                    + " (rolled " + r.guardRoll() + " vs " + r.guardTN() + ")"});
+        }
+        rows.add(new String[]{"Damage dealt to Toughness", String.valueOf(r.damageDealt())});
+        rows.add(new String[]{"Strain (ignores Armor)", String.valueOf(r.strain())});
+        rows.add(new String[]{"Toughness", r.toughnessBefore() + " → " + Math.max(0, r.toughnessAfter()) + " / " + r.maxToughness()});
+        if (!r.effectsGained().isEmpty()) {
+            rows.add(new String[]{"Effects gained", String.join(", ", r.effectsGained())});
+        }
+
+        List<String> notes = new ArrayList<>();
+        if (r.toughnessAfter() <= 0) notes.add("Your Toughness reached 0. You will receive a Wound.");
+        showInfoPopup("You have been hit", head, "#8b0000", rows, notes);
+    }
+
+    private void showGuardSuccessPopup(HitResult r) {
+        String head = "You guarded against " + r.attackerName() + "'s attack!";
+
+        List<String[]> rows = new ArrayList<>();
+        rows.add(new String[]{"Guard roll", r.guardRoll() + " vs " + r.guardTN() + "  (success)"});
+        rows.add(new String[]{"Damage without Guard", r.wouldHaveDealt() + "   (" + r.damageAfterHalving() + " damage, "
+                + r.blockedByArmor() + " blocked by Armor " + r.baseArmor()
+                + (r.bonusArmor() > 0 ? " + " + r.bonusArmor() + " Layered Field" : "")
+                + ", Penetration " + r.penetration() + ")"});
+        rows.add(new String[]{"Blocked by Guard", String.valueOf(r.wouldHaveDealt())});
+        rows.add(new String[]{"Strain that still went through", String.valueOf(r.strain())});
+        rows.add(new String[]{"Toughness", r.toughnessBefore() + " → " + Math.max(0, r.toughnessAfter()) + " / " + r.maxToughness()});
+
+        List<String> notes = new ArrayList<>();
+        notes.add("Guard does not stop Strain.");
+        if (r.toughnessAfter() <= 0) notes.add("Your Toughness reached 0. You will receive a Wound.");
+        showInfoPopup("Attack guarded", head, "#2e7d32", rows, notes);
+    }
+
+    /** Information only: not a turn, does not block processing. */
+    private void showInfoPopup(String title, String headline, String accentHex,
+                               List<String[]> rows, List<String> notes) {
+        if (closed) return;
+        Stage s = newChildStage();
+        s.initModality(Modality.NONE);
+        s.setTitle(title);
+
+        Label head = new Label(headline);
+        head.setWrapText(true);
+        head.setMaxWidth(400);
+        head.setStyle("-fx-font-size: 14px; -fx-font-weight: bold; -fx-text-fill: " + accentHex + ";");
+
+        GridPane grid = new GridPane();
+        grid.setHgap(14);
+        grid.setVgap(5);
+        grid.setStyle("-fx-background-color: #f4f4f4; -fx-padding: 10; -fx-border-color: #cccccc; -fx-border-width: 1;");
+        int r = 0;
+        for (String[] row : rows) {
+            Label k = new Label(row[0]);
+            k.setStyle("-fx-text-fill: #555;");
+            Label v = new Label(row[1]);
+            v.setWrapText(true);
+            v.setMaxWidth(250);
+            v.setStyle("-fx-font-weight: bold;");
+            grid.add(k, 0, r);
+            grid.add(v, 1, r);
+            r++;
+        }
+
+        VBox box = new VBox(12, head, grid);
+        for (String n : notes) {
+            Label nl = new Label(n);
+            nl.setWrapText(true);
+            nl.setMaxWidth(400);
+            nl.setStyle("-fx-font-style: italic; -fx-text-fill: #333;");
+            box.getChildren().add(nl);
+        }
+        BetterButton ok = new BetterButton("OK");
+        ok.setPrimaryStyle();
+        ok.setOnAction(e -> s.close());
+        box.getChildren().add(ok);
+        box.setPadding(new Insets(16));
+        box.setAlignment(Pos.CENTER);
+        box.setStyle("-fx-border-color: " + accentHex + "; -fx-border-width: 3;");
+
+        s.setScene(new Scene(box, 460, Math.min(680, 190 + rows.size() * 30 + notes.size() * 36)));
+        s.show();
+    }
 
 
 
@@ -2051,6 +2271,17 @@ public class Game {
         HBox onHitRow = new HBox(10, new Label("Superconductive (on damage):"), onHitCombo);
         onHitRow.setAlignment(Pos.CENTER);
 
+        // ---------- Polythermic Overheat (chosen BEFORE the damage is rolled) ----------
+        final boolean polythermic = tech == Weapon.Tech.POLYTHERMIC;
+        final String overheatPenaltyText = weapon != null
+                ? "-2 damage on your next attack with this weapon"
+                : "-2 damage until the end of the round";
+        final CheckBox overheatCb = new CheckBox("Overheat: " + profile.Dice + "d" + profile.Dicepower
+                + " → " + profile.overheatPreview() + "   (afterwards " + overheatPenaltyText + ")");
+        overheatCb.setWrapText(true);
+        overheatCb.setMaxWidth(500);
+        overheatCb.setStyle("-fx-font-weight: bold; -fx-text-fill: #b45f00;");
+
         // ---------- Results ----------
         VBox resultsBox = new VBox(6);
         resultsBox.setAlignment(Pos.CENTER);
@@ -2084,7 +2315,7 @@ public class Game {
         if (profile.AreaType == -2)
             areaNote.setText("Line attack: hits everything along the line. Half damage if it misses or is guarded.");
         else if (profile.AreaType >= 0)
-            areaNote.setText("Area " + profile.AreaType + " attack: hits allies too. Half damage if it misses or is guarded.");
+            areaNote.setText("Area " + profile.AreaType + " attack: Half damage if it misses or is guarded.");
 
         resultsBox.getChildren().addAll(
                 accuracyHeader, accuracyResult, dosLabel,
@@ -2144,6 +2375,16 @@ public class Game {
                         .append(", applied even if the target guards.");
             if (tech == Weapon.Tech.SUPERCONDUCTIVE)
                 tn2.append("Superconductive: the chosen effect applies to each target that takes damage.");
+            if (polythermic) {
+                overheatCb.setSelected(profile.overheated);
+                overheatCb.setDisable(true);                      // the choice is locked after the roll
+                if (profile.overheated) {
+                    overheatCb.setText("Overheated  (afterwards " + overheatPenaltyText + ")");
+                    tn2.append("Overheated: damage rolled with ").append(profile.Dice).append("d")
+                            .append(profile.Dicepower).append(". Afterwards ").append(overheatPenaltyText).append(".");
+                }
+            }
+            profileLabel.setText(describeProfileForPopup(profile, weapon));   // shows the changed dice
             techNote.setText(tn2.toString());
 
             rollBtn.setDisable(true);
@@ -2158,6 +2399,13 @@ public class Game {
 
             action.accuracyTN     = tn;
             action.rolledHitValue = rng.nextInt(1, 101);
+
+            if (polythermic && overheatCb.isSelected()) {
+                profile.applyOverheat();                          // changes Dice / Dicepower / Power BEFORE the dice are rolled
+                action.getSelfEffects().removeIf(fx -> fx.getName().equals(Effect.OVERHEAT_PENALTY));
+                action.addSelfEffect(Effect.overheatPenalty(weapon != null));
+            }
+            overheatCb.setDisable(true);
 
             int diceTotal = 0;
             for (int i = 0; i < profile.Dice; i++) diceTotal += rng.nextInt(1, profile.Dicepower + 1);
@@ -2181,6 +2429,7 @@ public class Game {
 
         if (!canAfford) {
             rollBtn.setDisable(true);
+            overheatCb.setDisable(true);
             areaNote.setText("Not enough resources for this attack.");
         }
         if (action.rolledHitValue > 0) refresh.run();     // popup reopened after a roll
@@ -2190,6 +2439,7 @@ public class Game {
 
         content.getChildren().addAll(titleLabel, targetLabel, profileLabel, costRow);
         if (tech == Weapon.Tech.SUPERCONDUCTIVE) content.getChildren().add(onHitRow);
+        if (polythermic) content.getChildren().add(overheatCb);
         content.getChildren().addAll(rollBtn, resultsBox, btnBox);
 
         final double[] dragOffset = new double[2];
@@ -2226,7 +2476,7 @@ public class Game {
                 case GAUSS          -> sb.append(" | Gauss (+1 dmg/DoS, max +4)");
                 case CHAIN          -> sb.append(" | Chain (1 Strain/DoS, max 3)");
                 case SUPERCONDUCTIVE-> sb.append(" | Superconductive");
-                case POLYTHERMIC -> { if (weapon.isActiveTech()) sb.append("   |   OVERHEAT"); }
+                case POLYTHERMIC -> sb.append(p.overheated ? " | OVERHEATED" : " | Polythermic");
                 case N2SHELL  -> { if (weapon.isActiveTech()) sb.append("   |   N2 Shell Active"); }
                 case MASER    -> { if (weapon.isActiveTech()) sb.append("   |   Maser Active"); }
                 default -> { }
@@ -3470,6 +3720,11 @@ public class Game {
             }
         }
 
+        if (!w.getEffects().isEmpty()) {
+            sb.append("\nEffects:\n");
+            for (Effect e : w.getEffects()) sb.append("  • ").append(e.getName()).append("\n");
+        }
+
         // ---- Optional flavour text from the item itself ----
         String flavour = w.getDescription();
         if (flavour != null && !flavour.isBlank()) {
@@ -3541,6 +3796,11 @@ public class Game {
         QueuePosition current = getCurrentPosition();
         if (current == null || !current.Reaction) return;
 
+        Action currentAction = gamestate.getActionfromNumber(current.getReactionTo());
+        if (currentAction == null) {
+            LogError("ERROR: REACTION POP UP SHOWING WITHOUT PROPER ACTION TO REACT TO\n");
+            return;
+        }
         popupShowing = true;
 
         Stage popupStage = newChildStage();
@@ -3561,12 +3821,6 @@ public class Game {
         BetterButton confirmBtn = new BetterButton("Confirm");
         BetterButton cancelBtn = null;
 
-        Action currentAction = gamestate.getActionfromNumber(getCurrentPosition().getReactionTo());
-        if (currentAction == null) {
-            LogMessage("ERROR: REACTION POP UP SHOWING WITHOUT PROPER ACTION TO REACT TO");
-            return;
-        }
-
         switch (current.getReactionType()) {
             case DM_SETUP_PLAYER:
                 specificContent = buildDMSetupContent(confirmBtn, popupStage, currentAction);
@@ -3576,6 +3830,9 @@ public class Game {
                 break;
             case DEFENCE:
                 specificContent = buildDefenceContent(confirmBtn, popupStage, currentAction, current);
+                break;
+            case WOUND:
+                specificContent = buildWoundContent(confirmBtn, popupStage, currentAction, current);
                 break;
             default:
                 // For other types, just show a message and confirm
@@ -3589,20 +3846,9 @@ public class Game {
 
         // Confirm button logic: it will be enabled/disabled by the content builders
         confirmBtn.setPrimaryStyle();
-        confirmBtn.setDisable(current.getReactionType() != ReactionType.DEFENCE);
+        ReactionType rt = current.getReactionType();
+        confirmBtn.setDisable(rt != ReactionType.DEFENCE && rt != ReactionType.WOUND);
 
-        // TODO SKIPPABLE
-     /*   if (current.isSkippable()) {
-            cancelBtn = new BetterButton("Cancel");
-            cancelBtn.setDangerStyle();
-            cancelBtn.setOnAction(e -> {
-                // Skip this reaction: remove it from queue and update
-                removeCurrentPosition();
-                popupStage.close();
-                popupShowing = false;
-                updateActivePlayerAndPopup();
-            });
-        } */
 
         HBox btnBox = new HBox(10);
         btnBox.setAlignment(Pos.CENTER);
@@ -3627,6 +3873,40 @@ public class Game {
     }
 
 
+    private Node buildWoundContent(Button proceedBtn, Stage popupStage, Action cause, QueuePosition reactionPos) {
+        VBox root = new VBox(10);
+        root.setPadding(new Insets(5));
+
+        FieldUnit unit = getUnitFromName(reactionPos.getUnitID());
+        if (unit == null || !unit.isExists()) {
+            LogError("ERROR - wound popup without a valid unit\n");
+            root.getChildren().add(new Label("Nothing to do."));
+            return root;
+        }
+
+        String by = (cause instanceof AttackAction a) ? a.getActor() : "an unknown source";
+        Label from = new Label("Wound dealt by: " + by);
+        from.setStyle("-fx-font-weight: bold; -fx-text-fill: #8b0000;");
+        Label tough = new Label("Toughness: " + Math.max(0, unit.getToughness()) + " / " + unit.getMaxToughness());
+        Label note = new Label("When you proceed, your Toughness is restored to " + unit.getMaxToughness() + ".");
+        note.setWrapText(true);
+        note.setMaxWidth(340);
+        VBox box = new VBox(4, from, tough, note);
+        box.setStyle("-fx-background-color: #fff0f0; -fx-padding: 8; -fx-border-color: #d99; -fx-border-width: 1;");
+
+        proceedBtn.setText("Proceed");
+        proceedBtn.setDisable(false);
+        proceedBtn.setOnAction(e -> {
+            if (queue.currentPosition() != reactionPos) { popupStage.close(); return; }   // stale popup
+            proceedBtn.setDisable(true);
+            SendAction(new DealWoundAction(currentActionNumber + 1, unit.getName()));
+            popupStage.close();
+        });
+
+        root.getChildren().add(box);
+        return root;
+    }
+
     private Node buildDefenceContent(Button proceedBtn, Stage popupStage, Action cause, QueuePosition reactionPos) {
         VBox root = new VBox(10);
         root.setPadding(new Insets(5));
@@ -3640,17 +3920,22 @@ public class Game {
         }
         final AttackProfile profile = atk.getActionCombatProfile();
         final boolean reduced = isReducedByMiss(atk);
-        final int incoming = reduced ? atk.rolledDamage / 2 : atk.rolledDamage;
+        final int incoming = (reduced ? atk.rolledDamage / 2 : atk.rolledDamage);
 
         // ---------- Incoming attack ----------
         Label inHeader = new Label("Incoming attack");
         inHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #8b0000;");
         Label dmg = new Label("Damage: " + incoming + (reduced ? "  (halved, the attack missed)" : ""));
         Label pen = new Label("Penetration: " + profile.Penetration);
-        Label strain = new Label("Strain: " + profile.Strain);
+        Label strain = new Label("Strain: " + profile.Strain + "  (ignores Armor, applies even if you guard)");
         VBox incomingBox = new VBox(3, inHeader, dmg, pen, strain);
         incomingBox.setStyle("-fx-background-color: #fff0f0; -fx-padding: 8; -fx-border-color: #d99; -fx-border-width: 1;");
-
+        if (profile.AreaType != -1 && !reduced) {
+            Label areaNote = new Label("Area/Line: a successful Guard only halves the damage.");
+            areaNote.setWrapText(true);
+            areaNote.setStyle("-fx-font-style: italic; -fx-text-fill: #b00020;");
+            incomingBox.getChildren().add(areaNote);
+        }
         // ---------- Your stats ----------
         Label youHeader = new Label("Your defences: " + defender.getName());
         youHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #1a1a4d;");
@@ -3675,7 +3960,7 @@ public class Game {
                     : "Armor: " + base);
             armorLabel.setStyle(on ? "-fx-text-fill: #2e7d32; -fx-font-weight: bold;" : "");
             int through = Math.max(0, incoming - Math.max(0, total - profile.Penetration));
-            expected.setText("Damage you would take if unguarded: " + through);
+            expected.setText("Damage you would take if unguarded: " + through+(profile.Strain > 0 ? " + "+profile.Strain+" strain" : ""));
         };
         layered.selectedProperty().addListener((o, a, b) -> updateArmor.run());
         updateArmor.run();
@@ -3683,7 +3968,7 @@ public class Game {
         // ---------- Guard ----------
         // TODO: Guard is disabled for a missed Area/Line because it cannot reduce the half damage any
         // further. If the rules change (e.g. Guard should still negate it), remove `reduced` here AND in
-        // processDefenceAction (guardWorks) and processAttackAction (canReact).
+
         final boolean guardBlocked = defender.usedGuard() || reduced;
         final int guardTN = AttackAction.clampTN(defender.getReflexes());
         final boolean[] rolled = {false};
@@ -3701,7 +3986,9 @@ public class Game {
             roll[0] = java.util.concurrent.ThreadLocalRandom.current().nextInt(1, 101);
             rolled[0] = true;
             boolean ok = AttackAction.rollSucceeds(roll[0], guardTN);
-            guardResult.setText("Rolled " + roll[0] + " vs " + guardTN + (ok ? "  -  GUARD SUCCESS, no damage" : "  -  guard failed"));
+            guardResult.setText("Rolled " + roll[0] + " vs " + guardTN + (ok
+                    ? (profile.AreaType != -1 ? "  -  GUARD SUCCESS, half damage" : "  -  GUARD SUCCESS, no damage")
+                    : "  -  guard failed"));
             guardResult.setStyle("-fx-font-weight: bold; -fx-text-fill: " + (ok ? "#2e7d32" : "#b00020") + ";");
             guardBtn.setDisable(true);
         });

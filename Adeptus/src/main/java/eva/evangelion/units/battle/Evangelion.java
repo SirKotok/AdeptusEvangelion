@@ -33,14 +33,13 @@ public class Evangelion extends Unit{
         int i = 0;
         for (Slot slot : Slots) {
             i++;
-            Weapon test = Weapon.createBasicRangedWeapon("weapon #"+i, "SMG", Weapon.Tech.NONE, new ArrayList<>(), Weapon.Hand.ONE_HANDED, 4, 2 ,5);
+            Weapon test = Weapon.createBasicMeleeWeapon("weapon #"+i, "Knife", Weapon.Tech.NONE, new ArrayList<>(), Weapon.Hand.ONE_HANDED);
             test.WeaponProperties.add(Weapon.WeaponProperty.SMALL);
             double p = Math.random();
-            if (p<0.25) test.setBaseArea(2);
-            else if (p<0.5) test.setBaseArea(-2);
-            p = Math.random();
-            if (p<0.25) test.Technology.set(0, Weapon.Tech.MASER);
-            else if (p<0.5) test.Technology.set(0, Weapon.Tech.N2SHELL);
+            if (p<0.25) test.Technology.set(0, Weapon.Tech.CHAIN);
+            else if (p<0.5) test.Technology.set(0, Weapon.Tech.SUPERCONDUCTIVE);
+            else if (p<0.75) test.Technology.set(0, Weapon.Tech.POLYTHERMIC);
+            else test.Technology.set(0, Weapon.Tech.PROGRESSIVE);
             test.setDisplayIcon("weapon_"+i+".png");
             slot.setItem(test);
         }

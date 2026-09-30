@@ -1,6 +1,7 @@
 package eva.evangelion.state.actions;
 
 import eva.evangelion.items.Weapon.AttackProfile;
+import eva.evangelion.units.battle.Effect;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -54,6 +55,18 @@ public class AttackAction extends Action {
     public void setActionCombatProfile(AttackProfile actionCombatProfile) {
         this.actionCombatProfile = actionCombatProfile;
     }
+
+
+    /** Effects the attacker puts on himself once this attack is processed (e.g. Overheat penalty).
+     *  They go on the weapon that was used, or on the unit itself if no weapon was used. */
+    public List<Effect> selfEffects = new ArrayList<>();
+
+    public List<Effect> getSelfEffects() {
+        if (selfEffects == null) selfEffects = new ArrayList<>();   // actions saved before this field existed
+        return selfEffects;
+    }
+
+    public void addSelfEffect(Effect e) { if (e != null) getSelfEffects().add(e); }
 
     public int rolledHitValue;   // raw d100 attack roll
     public int rolledDamage;  // raw damage: dice + Power + bonus damage// Halving on a miss in case of canFullyMiss = false is applied on client side processing attack action. Halved BEFORE armor is taken into account.

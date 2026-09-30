@@ -7,7 +7,8 @@ public class QueuePosition {
         PLAYER_SETUP,
         ATTACK_OF_OPPORTUNITY,
         DM_DRAMA_MOVEMENT,
-        DEFENCE
+        DEFENCE,
+        WOUND
     }
 
     public int Round = -1;

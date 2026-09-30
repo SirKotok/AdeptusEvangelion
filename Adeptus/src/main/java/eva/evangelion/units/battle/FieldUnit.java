@@ -1,6 +1,7 @@
 package eva.evangelion.units.battle;
 
 import eva.evangelion.items.Weapon.AttackProfile;
+import eva.evangelion.items.Weapon.Weapon;
 import eva.evangelion.units.active.Slot;
 import eva.evangelion.units.type.EvangelionType;
 import javafx.scene.paint.Paint;
@@ -187,12 +188,32 @@ public class FieldUnit {
         CurrentEffects.remove(effect);
     }
 
-    /**
-     * Removes every effect whose {@link Effect.EffectEnd} matches the given
-     * category. Call this at Turn end, Round end, or on command.
-     */
+    /** Every weapon in this unit's slots (also passive / inactive slots). */
+    public List<Weapon> getAllWeapons() {
+        List<Weapon> result = new ArrayList<>();
+        List<Slot> slots = getSlots();
+        if (slots == null) return result;
+        for (Slot s : slots) {
+            if (s.getItem() instanceof Weapon w) result.add(w);
+        }
+        return result;
+    }
+
     public void ClearEffects(Effect.EffectEnd end) {
+        ClearEffects(end, null);
+    }
+
+    /**
+     * Clears the unit's effects of this kind and the effects of the same kind on its weapons.
+     * ATTACK is weapon-specific: only the weapon that was used (null = unarmed) gets cleared,
+     * otherwise attacking with weapon B would wipe the Overheat penalty sitting on weapon A.
+     */
+    public void ClearEffects(Effect.EffectEnd end, Weapon usedWeapon) {
         CurrentEffects.removeIf(e -> e.getEffectEnd() == end);
+        for (Weapon w : getAllWeapons()) {
+            if (end == Effect.EffectEnd.ATTACK && w != usedWeapon) continue;
+            w.clearEffects(end);
+        }
     }
 
 

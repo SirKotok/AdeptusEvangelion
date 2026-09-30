@@ -16,6 +16,7 @@ public class Effect implements Serializable {
         ATTACK,
         NEVER,      // lasts until manually removed (e.g. permanent upgrades)
         TURN_END,   // cleared at the end of the current Turn
+        TURN_START,
         ROUND_END,  // cleared at the end of the current Round
         COMMAND     // cleared only when explicitly commanded (e.g. end of battle)
     }
@@ -104,6 +105,16 @@ public class Effect implements Serializable {
         Effect debuff = new Effect("Superconductive_Guard", EffectEnd.GUARD).withReflexes(-10);
         debuff.stacks = false;
         return debuff;
+    }
+
+    public static final String OVERHEAT_PENALTY = "Overheat_Penalty";
+
+    /** Polythermic Overheat: -2 damage (Attack Strength).
+     *  On a weapon it lasts until the next attack with that weapon, on a unit without a weapon until the end of the round. */
+    public static Effect overheatPenalty(boolean onWeapon) {
+        Effect penalty = new Effect(OVERHEAT_PENALTY, onWeapon ? EffectEnd.ATTACK : EffectEnd.ROUND_END)
+                .withAttackStrength(-2);
+        return penalty;
     }
 
     /** Independent copy, so one attack can give each target its own instance. */
