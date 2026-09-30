@@ -27,20 +27,31 @@ public class Evangelion extends Unit{
         Slots.add(Slot.ArmSlot("Right Arm"));
         Slots.add(Slot.StorageSlot("Left Storage"));
         Slots.add(Slot.StorageSlot("Right Storage"));
-        Slots.add(Slot.StorageSlot("A"));
-        Slots.add(Slot.StorageSlot("B"));
-        Slots.add(Slot.ArmSlot("Third Arm"));
+        Slots.add(Slot.StorageSlot("Test Storage Slot"));
+        Slots.add(Slot.ArmSlot("Test Third Arm"));
         int i = 0;
         for (Slot slot : Slots) {
             i++;
-            Weapon test = Weapon.createBasicMeleeWeapon("weapon #"+i, "Knife", Weapon.Tech.NONE, new ArrayList<>(), Weapon.Hand.ONE_HANDED);
-            test.WeaponProperties.add(Weapon.WeaponProperty.SMALL);
             double p = Math.random();
+            Weapon test;
+            if (p > 0.5) test = Weapon.createBasicMeleeWeapon("weapon #"+i, "Knife", Weapon.Tech.NONE, new ArrayList<>(), Weapon.Hand.ONE_HANDED);
+            else test = Weapon.createBasicRangedWeapon("weapon #"+i, "Knife", Weapon.Tech.NONE, new ArrayList<>(), Weapon.Hand.ONE_HANDED, 2, 4, 6);
+            test.WeaponProperties.add(Weapon.WeaponProperty.SMALL);
+            p = Math.random();
+            if (test.isRanged()) {
+                if (p<0.25)  test.Technology.set(0, Weapon.Tech.POSITRON);
+            else if (p<0.5) test.Technology.set(0, Weapon.Tech.MASER);
+                else if (p<0.75) test.Technology.set(0, Weapon.Tech.N2SHELL);
+                else test.Technology.set(0, Weapon.Tech.GAUSS);
+            } else {
             if (p<0.25) test.Technology.set(0, Weapon.Tech.CHAIN);
             else if (p<0.5) test.Technology.set(0, Weapon.Tech.SUPERCONDUCTIVE);
             else if (p<0.75) test.Technology.set(0, Weapon.Tech.POLYTHERMIC);
-            else test.Technology.set(0, Weapon.Tech.PROGRESSIVE);
-            test.setDisplayIcon("weapon_"+i+".png");
+            else test.Technology.set(0, Weapon.Tech.PROGRESSIVE); }
+            int num1 = (int) (Math.random() * 18);
+            int num2 = 18 + (int) (Math.random() * 6);
+            if (test.isRanged()) test.setDisplayIcon("weapon_"+num1+".png");
+            else test.setDisplayIcon("weapon_"+num2+".png");
             slot.setItem(test);
         }
     }

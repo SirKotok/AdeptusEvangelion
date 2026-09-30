@@ -23,7 +23,7 @@ public class AttackProfile implements Serializable {
      // Area = -1 -> Normal Attack
      // Area = 0+ -> Area Attack
     public int ATP;
-    public int multihit = 3;
+    public int multihit = 1;
     public int MinRange = 0;   // minimum distance (sectors) for a normal hit
     public int MaxRange = 1;   // maximum distance (sectors) for a normal hit
     public String name;
