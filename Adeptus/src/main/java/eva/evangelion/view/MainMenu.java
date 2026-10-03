@@ -18,7 +18,8 @@ import javafx.scene.layout.*;
 import javafx.scene.media.AudioClip;
 import javafx.scene.paint.Color;
 import javafx.stage.Stage;
-
+import javafx.stage.DirectoryChooser;
+import java.nio.file.Path;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
@@ -503,6 +504,36 @@ public class MainMenu {
         VBox speedBox = new VBox(5, speedLabel, speedSlider, fastCheck);
         speedBox.setAlignment(Pos.CENTER_LEFT);
 
+        // ---- Games folder ----
+        Label folderTitle = new Label("Games folder:");
+        folderTitle.setStyle("-fx-font-weight: bold;");
+        Label folderLabel = new Label();
+        folderLabel.setWrapText(true);
+        Runnable refreshFolderLabel = () -> folderLabel.setText(
+                GameStateStore.gamesDir().toAbsolutePath().normalize()
+                        + (GameStateStore.isDefaultGamesDir() ? "  (default)" : ""));
+        refreshFolderLabel.run();
+
+        BetterButton changeFolderBtn = new BetterButton("Change...");
+        changeFolderBtn.setPrimaryStyle();
+        changeFolderBtn.setOnAction(e -> {
+            DirectoryChooser chooser = new DirectoryChooser();
+            chooser.setTitle("Select games folder");
+            File current = GameStateStore.gamesDir().toAbsolutePath().toFile();
+            if (current.isDirectory()) chooser.setInitialDirectory(current);
+            File chosen = chooser.showDialog(mainStage);
+            if (chosen != null) applyGamesDir(chosen.toPath(), refreshFolderLabel);
+        });
+
+        BetterButton resetFolderBtn = new BetterButton("Reset to default");
+        resetFolderBtn.setSecondaryStyle();
+        resetFolderBtn.setOnAction(e -> applyGamesDir(null, refreshFolderLabel));
+
+        HBox folderButtons = new HBox(10, changeFolderBtn, resetFolderBtn);
+        folderButtons.setAlignment(Pos.CENTER_LEFT);
+        VBox folderBox = new VBox(5, folderTitle, folderLabel, folderButtons);
+        folderBox.setAlignment(Pos.CENTER_LEFT);
+
         // ---- Confirm Button ----
         BetterButton confirmBtn = new BetterButton("Confirm");
         confirmBtn.setSuccessStyle();
@@ -530,7 +561,7 @@ public class MainMenu {
                     alert.showAndWait();
                     return;
                 }
-                File gameFile = GameStateStore.file(GameStateStore.ACTIVE_DIR).toFile();
+                File gameFile = GameStateStore.file(GameStateStore.activeDir()).toFile();
                 if (!gameFile.exists()) {
                     Alert alert = new Alert(Alert.AlertType.ERROR);
                     alert.setContentText("No game file found");
@@ -548,9 +579,21 @@ public class MainMenu {
             }
         });
 
-        content.getChildren().addAll(title, modeBox, modeSpecificBox, speedBox, confirmBtn);
+        content.getChildren().addAll(title, modeBox, modeSpecificBox, speedBox, folderBox, confirmBtn);
         container.addNode(content);
         return container;
+    }
+    /** Applies a new games folder (null = default) and reports a problem to the user. */
+    private void applyGamesDir(Path dir, Runnable onDone) {
+        try {
+            if (dir == null) GameStateStore.resetGamesDir();
+            else GameStateStore.setGamesDir(dir);
+            onDone.run();
+        } catch (IOException ex) {
+            Alert alert = new Alert(Alert.AlertType.ERROR);
+            alert.setContentText("Could not use that folder:\n" + ex.getMessage());
+            alert.showAndWait();
+        }
     }
 
     public Stage getMainStage() {

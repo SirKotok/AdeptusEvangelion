@@ -1,5 +1,7 @@
 package eva.evangelion.state;
 
+import eva.evangelion.view.options.GameOptions;
+
 import java.io.IOException;
 import java.nio.file.*;
 import java.time.LocalDateTime;
@@ -13,29 +15,73 @@ import java.util.stream.Stream;
 import static java.nio.file.StandardCopyOption.*;
 
 public final class GameStateStore {
-    public static final Path GAMES_DIR  = Paths.get("Active", "Games");
-    public static final Path ACTIVE_DIR = GAMES_DIR.resolve("activegame");
-    public static final Path DM_DIR     = GAMES_DIR.resolve("DMgame");
-    public static final Path SAVED_DIR  = GAMES_DIR.resolve("saved");
-    private static final Path TMP_DIR   = GAMES_DIR.resolve("tmp");   // outside the watched folders
+    /** Root of the folders that never move: DMgame, saved, tmp. */
+    private static final Path ROOT_DIR = Paths.get("Active", "Games");
+    private static final Path DEFAULT_ACTIVE_DIR = ROOT_DIR.resolve("activegame");
+    /** The folder holding the shared active game. The only thing the main menu can change. */
+    private static volatile Path activeDir = initialActiveDir();
+
     public static final String FILE_NAME = "gamestate.ser";
     private static final Pattern VALID_NAME = Pattern.compile("[A-Za-z0-9_-]{1,50}");
 
     private GameStateStore() {}
 
+    // ---- folder layout ----
+
+    // "games dir" in these names means the ACTIVE GAME folder
+    public static Path defaultGamesDir() { return DEFAULT_ACTIVE_DIR; }
+    public static Path gamesDir()  { return activeDir; }
+    public static Path activeDir() { return activeDir; }
+    public static Path dmDir()     { return ROOT_DIR.resolve("DMgame"); }
+    public static Path savedDir()  { return ROOT_DIR.resolve("saved"); }
+    private static Path tmpDir()   { return ROOT_DIR.resolve("tmp"); }   // outside the watched folders
+
+    public static boolean isDefaultGamesDir() { return activeDir.equals(DEFAULT_ACTIVE_DIR); }
+
+    private static Path initialActiveDir() {
+        String saved = GameOptions.loadGamesDirectory();
+        if (saved == null) return DEFAULT_ACTIVE_DIR;
+        try {
+            return Paths.get(saved);
+        } catch (InvalidPathException e) {
+            System.err.println("Ignoring invalid games folder in options: " + saved);
+            return DEFAULT_ACTIVE_DIR;
+        }
+    }
+
+    /**
+     * Makes this folder the active game folder (gamestate.ser lives directly in it)
+     * and remembers it in options.properties.
+     * Games already open keep the folder they were started with. Nothing is moved or copied.
+     * @throws IOException if the folder can't be created or written to; the old folder stays active then
+     */
+    public static void setGamesDir(Path dir) throws IOException {
+        Path target = dir.equals(DEFAULT_ACTIVE_DIR) ? DEFAULT_ACTIVE_DIR : dir.toAbsolutePath().normalize();
+        Files.createDirectories(target);
+        if (!Files.isWritable(target)) throw new IOException("Folder is not writable: " + target);
+        activeDir = target;
+        GameOptions.saveGamesDirectory(target.equals(DEFAULT_ACTIVE_DIR) ? null : target.toString());
+    }
+
+    public static void resetGamesDir() throws IOException {
+        setGamesDir(DEFAULT_ACTIVE_DIR);
+    }
+
     public static Path file(Path dir) { return dir.resolve(FILE_NAME); }
 
     public static void ensureDirs() throws IOException {
-        Files.createDirectories(ACTIVE_DIR);
-        Files.createDirectories(DM_DIR);
-        Files.createDirectories(SAVED_DIR);
-        Files.createDirectories(TMP_DIR);
+        // fixed folders first, so an unreachable custom folder can't stop them being created
+        Files.createDirectories(dmDir());
+        Files.createDirectories(savedDir());
+        Files.createDirectories(tmpDir());
+        Files.createDirectories(activeDir());
     }
 
-    /** One-time: copy the old single-file location into activegame if activegame has nothing yet. */
+    /** One-time: copy the old single-file location into activegame. Only for the default folder. */
     public static void migrateLegacy(Path legacyFile) throws IOException {
-        if (Files.exists(legacyFile) && !Files.exists(file(ACTIVE_DIR))) {
-            Files.copy(legacyFile, file(ACTIVE_DIR));
+        if (!isDefaultGamesDir()) return;
+        if (Files.exists(legacyFile) && !Files.exists(file(activeDir()))) {
+            Files.copy(legacyFile, file(activeDir()));
         }
     }
 
@@ -43,13 +89,13 @@ public final class GameStateStore {
         if (name == null || !VALID_NAME.matcher(name).matches()) {
             throw new IllegalArgumentException("Invalid name (use 1-50 letters, digits, '_' or '-').");
         }
-        return SAVED_DIR.resolve(name + ".ser");
+        return savedDir().resolve(name + ".ser");
     }
 
     /** Writes to a temp file and moves it into place, so watchers never see a half-written file. */
     private static void writeTo(GameState state, Path target) throws IOException {
-        Files.createDirectories(TMP_DIR);
-        Path tmp = Files.createTempFile(TMP_DIR, "state", ".tmp");
+        Files.createDirectories(tmpDir());
+        Path tmp = Files.createTempFile(tmpDir(), "state", ".tmp");
         try {
             state.saveToFile(tmp);
             try {
@@ -86,8 +132,9 @@ public final class GameStateStore {
 
     public static List<String> listSaves() throws IOException {
         List<String> names = new ArrayList<>();
-        if (!Files.isDirectory(SAVED_DIR)) return names;
-        try (Stream<Path> s = Files.list(SAVED_DIR)) {
+        Path saved = savedDir();
+        if (!Files.isDirectory(saved)) return names;
+        try (Stream<Path> s = Files.list(saved)) {
             s.map(p -> p.getFileName().toString())
                     .filter(n -> n.toLowerCase().endsWith(".ser"))
                     .forEach(n -> names.add(n.substring(0, n.length() - 4)));
@@ -100,10 +147,10 @@ public final class GameStateStore {
 
     /** Copies the current activegame file into saved/ as _backup_<timestamp>, so replace/revert can be undone. */
     public static String backupActive() throws IOException {
-        Path f = file(ACTIVE_DIR);
+        Path f = file(activeDir());
         if (!Files.exists(f)) return null;
         String name = "_backup_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
-        Files.copy(f, SAVED_DIR.resolve(name + ".ser"), REPLACE_EXISTING);
+        Files.copy(f, savedDir().resolve(name + ".ser"), REPLACE_EXISTING);
         return name;
     }
 
@@ -112,7 +159,7 @@ public final class GameStateStore {
         backupActive();
         GameState fresh = source.deepCopy();
         fresh.newSession();
-        write(fresh, ACTIVE_DIR);
+        write(fresh, activeDir());
         return fresh;
     }
 }

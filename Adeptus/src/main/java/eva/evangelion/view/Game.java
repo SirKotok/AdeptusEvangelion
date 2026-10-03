@@ -207,7 +207,7 @@ public class Game {
     public Game(Battlefield battlefield, String playerName, double speed, boolean fast,
                 int playernumber, boolean startnew, GameState.GAME_MODE gameMode, boolean initialReloading) throws IOException {
         this(battlefield, playerName, speed, fast, playernumber, startnew, gameMode,
-                GameStateStore.ACTIVE_DIR, false, initialReloading);
+                GameStateStore.activeDir(), false, initialReloading);
     }
 
     /** round -> number of turns that happened in all earlier rounds. Round 0 has offset 0. */
@@ -6941,7 +6941,7 @@ public class Game {
     public static void startGame(Battlefield field, double speed, boolean fast, int playernumber,
                                  String playerName, boolean startNew, GameState.GAME_MODE gameMode) throws IOException {
         startGame(field, speed, fast, playernumber, playerName, startNew, gameMode,
-                GameStateStore.ACTIVE_DIR, false, false);
+                GameStateStore.activeDir(), false, false);
     }
 
 
@@ -7048,7 +7048,7 @@ public class Game {
         try {
             Path file = stateFile();
             if (Files.exists(file)) {
-                Files.copy(file, Paths.get(GAME_STATE_DIR, GAME_STATE_FILE + ".corrupted.bak"),
+                Files.copy(file, stateDir.resolve(GAME_STATE_FILE + ".corrupted.bak"),
                         StandardCopyOption.REPLACE_EXISTING);
                 LogMessage("Backed up corrupted GameState to " + GAME_STATE_FILE + ".corrupted.bak");
             }
@@ -7123,7 +7123,7 @@ public class Game {
                     ButtonType.OK);
             a.setHeaderText("Game replaced");
             a.showAndWait();
-            relaunch(GameStateStore.ACTIVE_DIR, false);
+            relaunch(GameStateStore.activeDir(), false);
         });
     }
 
@@ -7186,8 +7186,8 @@ public class Game {
         try {
             GameState s = GameStateStore.loadSave(parts[1]);
             if (s == null) return "No save named '" + parts[1] + "'.\n";
-            GameStateStore.write(s, GameStateStore.DM_DIR);   // overwrites the previous sandbox
-            relaunch(GameStateStore.DM_DIR, true);
+            GameStateStore.write(s, GameStateStore.dmDir());   // overwrites the previous sandbox
+            relaunch(GameStateStore.dmDir(), true);
             return "Opening '" + parts[1] + "' in DMgame...\n";
         } catch (IllegalArgumentException e) {
             return e.getMessage() + "\n";
@@ -7198,7 +7198,7 @@ public class Game {
 
     private String cmdLiveGame() {
         if (!dmSandbox) return "You are already in the active game.\n";
-        relaunch(GameStateStore.ACTIVE_DIR, false);
+        relaunch(GameStateStore.activeDir(), false);
         return "Returning to the active game...\n";
     }
 
@@ -7222,7 +7222,7 @@ public class Game {
                 restarting = false;
                 return "Replace failed: " + e.getMessage() + "\n";
             }
-            relaunch(GameStateStore.ACTIVE_DIR, false);
+            relaunch(GameStateStore.activeDir(), false);
             return "Active game replaced. Restarting...\n";
         } catch (IllegalArgumentException e) {
             return e.getMessage() + "\n";
@@ -7260,24 +7260,9 @@ public class Game {
             restarting = false;
             return "Revert failed: " + e.getMessage() + "\n";
         }
-        relaunch(GameStateStore.ACTIVE_DIR, false);
+        relaunch(GameStateStore.activeDir(), false);
         return "Reverted to action " + n + " (" + removed + " removed). Restarting...\n";
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 }
