@@ -7,6 +7,7 @@ import eva.evangelion.items.Weapon.AttackProfile;
 import eva.evangelion.items.Weapon.Weapon;
 import eva.evangelion.state.GameStateStore;
 import eva.evangelion.units.battle.*;
+import eva.evangelion.view.options.GameOptions;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 
@@ -104,6 +105,8 @@ public class Game {
     private final BooleanProperty dmMode = new SimpleBooleanProperty(false);
     private VBox namePanel;
     private VBox turnChoicePanel;
+    /** Non-null only while the DM "setup player" popup is open: receives board clicks. */
+    private java.util.function.BiConsumer<Integer, Integer> spawnPickHandler = null;
 
     // ---- Player & Active Player ----
     private String currentPlayer;              // Current assigned name to this client, local, not stored in GameState
@@ -120,6 +123,19 @@ public class Game {
     private boolean       attackModeActive = false;
     private FieldUnit     attackUnit = null;
     private ScrollableContainer attackWeaponChooserContainer;
+    // ---- Turn Actions retaining ---- //
+    private String pendingConfirmDescription = null;
+    private Color  pendingConfirmColor = Color.GRAY;
+    private boolean couldActLastCheck = false;      // detects "your turn just started"
+    private int lastMoveClickX = -1, lastMoveClickY = -1;
+
+    /** True only when the queue's current position is a normal (non-reaction) turn of this client's player. */
+    private boolean isMyActionTurn() {
+        if (queue == null || currentPlayer == null) return false;
+        QueuePosition cur = queue.currentPosition();
+        return cur != null && !cur.isReaction() && currentPlayer.equals(cur.getUnitID());
+    }
+
 
     // ---- UI top bar ----
     private HBox topBar;
@@ -152,6 +168,12 @@ public class Game {
     private final Map<String, Color> previewVisualisationLayer = new LinkedHashMap<>();
     private final Map<String, Color> attackVisualisationLayer  = new LinkedHashMap<>();
 
+    // Attack helper
+    private boolean attackUnarmedChosen = false;   // "Neutral (Unarmed)" explicitly picked
+
+
+    private final GameOptions  options = GameOptions.load();
+    
     // ---- Gameplay ----
     private Queue queue;
     private int CurrentRound = 0;
@@ -168,11 +190,13 @@ public class Game {
     private Timeline processingTimeline = null;
 
     /** True only while the initial batch of actions is being loaded. Forces fast processing. */
-    private boolean initialLoad;
+    private boolean initialReload;
+    private boolean initialLoad = true;
+
 
     /** Fast if the user chose fast actions, or if we are loading a game. */
     private boolean isFast() {
-        return fastActions || initialLoad;
+        return fastActions || initialReload;
     }
 
     // ============================================================
@@ -181,16 +205,19 @@ public class Game {
     private int startingplayernumber;
 
     public Game(Battlefield battlefield, String playerName, double speed, boolean fast,
-                int playernumber, boolean startnew, GameState.GAME_MODE gameMode, boolean initialloading) throws IOException {
+                int playernumber, boolean startnew, GameState.GAME_MODE gameMode, boolean initialReloading) throws IOException {
         this(battlefield, playerName, speed, fast, playernumber, startnew, gameMode,
-                GameStateStore.ACTIVE_DIR, false, initialloading);
+                GameStateStore.ACTIVE_DIR, false, initialReloading);
     }
+
+    /** round -> number of turns that happened in all earlier rounds. Round 0 has offset 0. */
+    private final Map<Integer, Integer> roundStartOffset = new HashMap<>();
 
 
     public Game(Battlefield battlefield, String playerName, double speed, boolean fast,
                 int playernumber, boolean startnew, GameState.GAME_MODE gameMode,
-                Path stateDir, boolean sandbox, boolean initialloading) throws IOException {
-        this.initialLoad = initialloading;
+                Path stateDir, boolean sandbox, boolean initialReloading) throws IOException {
+        this.initialReload = initialReloading;
         this.stateDir = stateDir;
         this.dmSandbox = sandbox;
         this.currentPlayer = (playerName != null && !playerName.isEmpty()) ? playerName : "Player";
@@ -203,9 +230,11 @@ public class Game {
         this.battlefield = battlefield;
         this.actionSpeed = speed;
         this.fastActions = fast;
+        bottomPanelHeight = options.bottomPanelHeight;
         startingplayernumber = playernumber;
         root = new BorderPane();
         centerStack = new StackPane();
+
 
         battlefieldTab = buildBattlefieldTab();
         buildInventoryTab();
@@ -285,10 +314,13 @@ public class Game {
     private void loadInitialGameState() {
         Path file = stateFile();
         if (Files.exists(file)) {
+            markInitialBatch = true;
             try {
                 reloadGameState();
             } finally {
-                initialLoad = false;        // back to the normal speed, even if loading failed
+                markInitialBatch = false;
+                initialReload = false;
+                initialLoad = false;
             }
         } else {
             gamestate = new GameState();
@@ -296,6 +328,16 @@ public class Game {
             sessionKnown = true;
             saveGameState();
         }
+    }
+
+    /** Actions up to this number were already in the file when the game was opened: no info popups for them. */
+    private int suppressPopupsUpTo = 0;
+    private boolean markInitialBatch = false;
+    /** Number of the action that processAction is working on right now. */
+    private int processingActionNumber = Integer.MAX_VALUE;
+
+    private boolean isReplay() {
+        return processingActionNumber <= suppressPopupsUpTo;
     }
 
     private void reloadGameState() {
@@ -313,6 +355,12 @@ public class Game {
             if (!sessionKnown) {                          // first successful load: remember it
                 knownSessionId = newState.getSessionId();
                 sessionKnown = true;
+            }
+            if (markInitialBatch) {
+                int max = 0;
+                for (Action a : newState.getActions()) max = Math.max(max, a.getActionNumber());
+                suppressPopupsUpTo = max;
+                markInitialBatch = false;
             }
 
             if (startingplayernumber == -1) {
@@ -405,6 +453,7 @@ public class Game {
                 processAction(action);
                 LogMessage("Processed action (fast): " + action);
             }
+            pruneActionArrows();
             isProcessing = false;
 
             LogMessage("Finished fast processing of all actions.");
@@ -427,6 +476,7 @@ public class Game {
                 if (closed) return;
                 processAction(action);
                 LogMessage("Processed action: " + action);
+                pruneActionArrows();
             });
 
             processingTimeline.getKeyFrames().add(kf);
@@ -451,6 +501,7 @@ public class Game {
 
     // ---- processAction: handles all action processing
     private void processAction(Action action) {
+        processingActionNumber = action.getActionNumber();
         processActionCost(action);
         if (action instanceof MoveAction) {
             processMoveAction((MoveAction) action);
@@ -497,6 +548,9 @@ public class Game {
             setActivePlayer(next.getUnitID());
         }
         refreshStatsContainers();
+        updateAttackButtonState();
+        renderConfirmButton();
+
     }
 
 
@@ -539,6 +593,10 @@ public class Game {
         }
         return false;
     }
+    /** Your turn is running and this unit has already used its Attack Action. */
+    private boolean alreadyAttackedThisTurn(FieldUnit u) {
+        return u != null && isMyActionTurn() && !u.canAttack();
+    }
 
     /** For now only restores Toughness. Wound effects come later. */
     private void processDealWoundAction(DealWoundAction wound) {
@@ -574,6 +632,15 @@ public class Game {
             LogError("ERROR - accuracy TN mismatch at action " + attack.getActionNumber()
                     + ": action says " + attack.accuracyTN + ", attacker has " + expectedTN + "\n");
         }
+        // ---- 1b. One Attack Action per Turn / Interval ----
+        if (!attack.isAttackOfOpportunity) {
+            if (!attacker.canAttack()) {
+                LogError("ERROR - " + attacker.getName() + " already attacked this turn, action "
+                        + attack.getActionNumber() + "\n");
+            }
+            attacker.setHasAttacked(true);
+        }
+
 
         // ---- 2. Ammo ----
         spendAmmo(attacker, attack, profile);
@@ -599,7 +666,7 @@ public class Game {
 
         for (FieldUnit missed : missedUnits) { //TODO show only when attack action is the last action in the processing queue, no need to show if it moved past it (initial load doesnt fully help here, need replacement)
             LogMessage(attacker.getName() + " missed " + missed.getName());
-            if (!initialLoad && missed.getName().equals(currentPlayer)) {
+            if (!initialReload && missed.getName().equals(currentPlayer)) {
                 showAttackMissedPopup(attacker.getName());
             }
         }
@@ -772,7 +839,9 @@ public class Game {
     }
 
     private void spendAmmo(FieldUnit attacker, AttackAction attack, AttackProfile profile) {
-        if (profile.AmmoCost <= 0) return;
+        if (profile.AmmoCost <= 0) {
+            return;
+        }
         List<Slot> slots = attacker.getSlots();
         if (slots == null || attack.slotNumber < 0 || attack.slotNumber >= slots.size()
                 || !(slots.get(attack.slotNumber).getItem() instanceof Weapon w)) {
@@ -874,7 +943,7 @@ public class Game {
 
     /** Information only: not a turn, does not block processing. */
     private void showAttackMissedPopup(String attackerName) {
-        if (closed) return;
+        if (closed || isReplay()) return;
         Stage s = newChildStage();
         s.initModality(Modality.NONE);
         s.setTitle("Attack missed");
@@ -897,10 +966,11 @@ public class Game {
 
     /** Only this player's own client shows it, and never while replaying an old game. */
     private boolean shouldShowInfoFor(FieldUnit unit) {
-        return !closed && !initialLoad && unit != null && unit.getName().equals(currentPlayer);
+        return !closed && !initialReload && unit != null && unit.getName().equals(currentPlayer);
     }
 
     private void showHitPopup(HitResult r) {
+        if (closed || isReplay()) return;
         String head;
         if (r.areaOrLine() && r.guarded()) {
             head = "You guarded against " + r.attackerName() + "'s area/line attack, but it still hit you for half damage.";
@@ -939,6 +1009,7 @@ public class Game {
     }
 
     private void showGuardSuccessPopup(HitResult r) {
+        if (closed || isReplay()) return;
         String head = "You guarded against " + r.attackerName() + "'s attack!";
 
         List<String[]> rows = new ArrayList<>();
@@ -960,7 +1031,7 @@ public class Game {
     /** Information only: not a turn, does not block processing. */
     private void showInfoPopup(String title, String headline, String accentHex,
                                List<String[]> rows, List<String> notes) {
-        if (closed) return;
+        if (closed || isReplay()) return;
         Stage s = newChildStage();
         s.initModality(Modality.NONE);
         s.setTitle(title);
@@ -1087,6 +1158,8 @@ public class Game {
         actor.ClearEffects(Effect.EffectEnd.TURN_END);
         actor.setTurnDone(true);
 
+        actor.setHasAttacked(false);
+
         if (actor.getUnit() instanceof Evangelion) {
             processEndPlayerTurn(action);
         } else if (actor.getUnit() instanceof Angel) {
@@ -1134,6 +1207,8 @@ public class Game {
             unit.setUsedGuard(false);
 
         }
+        roundStartOffset.put(CurrentRound + 1,                                   // NEW
+                roundStartOffset.getOrDefault(CurrentRound, 0) + CurrentTurn);
         CurrentTurn = 1;
         CurrentRound++;
         switch (gameMode) {
@@ -1776,6 +1851,12 @@ public class Game {
      */
     private void handleSectorClick(int x, int y) {
 
+        // 0. DM is choosing a spawn point for a player
+        if (spawnPickHandler != null) {
+            spawnPickHandler.accept(x, y);
+            return;
+        }
+
         // 1. Attack visualization mode wins
         if (attackModeActive && activeAttackProfile != null && attackUnit != null) {
             handleAttackSectorClick(x, y);
@@ -1807,7 +1888,7 @@ public class Game {
      */
 
     /** One aimed hit. x/y is the resolved target (for lines: the end of the line). dirX/dirY are only used by lines. */
-    private record PendingHit(int x, int y, int dirX, int dirY) {}
+    private record PendingHit(int x, int y, int dirX, int dirY, int clickX, int clickY) {}
 
     /** Oldest first. Its size never exceeds the profile's multihit. */
     private final LinkedList<PendingHit> pendingAttackHits = new LinkedList<>();
@@ -1852,9 +1933,9 @@ public class Game {
             List<int[]> line = getLineSectors(attackUnit.getX(), attackUnit.getY(), dirX, dirY, combatProfile.MaxRange);
             if (line.isEmpty()) return;
             int[] end = line.get(line.size() - 1);
-            hit = new PendingHit(end[0], end[1], dirX, dirY);
+            hit = new PendingHit(end[0], end[1], dirX, dirY, x, y);   // line
         } else {
-            hit = new PendingHit(x, y, 0, 0);
+            hit = new PendingHit(x, y, 0, 0, x, y);                   // everything else
         }
 
         // ---- Multihit: the newest click replaces the oldest ----
@@ -1890,9 +1971,9 @@ public class Game {
         if (isLine) desc.append(" [Line]");
         createConfirmButton(atk, Color.DARKRED, desc.toString());
 
-        LogMessage("Attack pending: " + pendingAttackHits.size() + "/" + maxHits
-                + " hit(s). Click Confirm to finalise" + (pendingAttackHits.size() < maxHits
-                ? ", or click more sectors." : "."));
+        LogMessage("Attack pending: " + pendingAttackHits.size() + "/" + maxHits + " hit(s). "
+                + (isMyActionTurn() ? "Click Confirm to finalise" : "It will be confirmable on your turn")
+                + (pendingAttackHits.size() < maxHits ? ", or click more sectors." : "."));
     }
 
     /** Rebuilds arrows (attack layer) from pendingAttackHits. */
@@ -1904,7 +1985,7 @@ public class Game {
         for (PendingHit h : pendingAttackHits) {
             double ex = h.x() * 20 + 10;
             double ey = h.y() * 20 + 10;
-            arrows.add(new Arrow(boardContainer, Color.RED, sx, sy, ex, ey, Arrow.ArrowType.PREVIEW));
+            registerArrow(new Arrow(boardContainer, Color.RED, sx, sy, ex, ey, Arrow.ArrowType.PREVIEW));
         }
 
         // Highlights (attack layer sits on top of the range zone in the preview layer)
@@ -2006,13 +2087,17 @@ public class Game {
         double ey = y * 20 + 10;
         Arrow preview = new Arrow(boardContainer, Color.ORANGE, sx, sy, ex, ey,
                 Arrow.ArrowType.PREVIEW);
-        arrows.add(preview);
+        registerArrow(preview);
+
+        lastMoveClickX = x;
+        lastMoveClickY = y;
 
         MoveAction mv = new MoveAction(currentActionNumber+1, movementUnit.getName(), dx, dy);
-        confirmAction = mv;
-        createConfirmButton(confirmAction, Color.DARKORANGE,
+        createConfirmButton(mv, Color.DARKORANGE,
                 movementUnit.getName() + " → " + CordsToText(x, y));
-        LocalMessage("Move pending. Click Confirm to choose movement type.");
+        LogMessage(isMyActionTurn()
+                ? "Move pending. Click Confirm to choose movement type."
+                : "Move prepared. You can confirm it when it's your turn.");
     }
 
 // ------------------------------------------------------------------
@@ -2054,12 +2139,51 @@ public class Game {
 
 
     private void createConfirmButton(Action action, Color color, String description) {
+        confirmAction = action;
+        pendingConfirmColor = color;
+        pendingConfirmDescription = description;
+        renderConfirmButton();
+    }
+
+    /** Real button on your turn, grey "pending" text otherwise. Safe to call any time. */
+    private void renderConfirmButton() {
+        if (confirmContainer == null) return;
         confirmContainer.getChildren().clear();
+        if (confirmAction == null) return;
+
+        // Not your turn: show what is prepared
+        if (!isMyActionTurn()) {
+            Label waiting = new Label("Pending: " + pendingConfirmDescription + "  (waits for your turn)");
+            waiting.setStyle("-fx-text-fill: #dddddd; -fx-font-style: italic;");
+            confirmContainer.getChildren().add(waiting);
+            return;
+        }
+
+        // Your turn, but this unit already used its Attack Action: show the action + the reason
+        if (confirmAction instanceof AttackAction pending
+                && alreadyAttackedThisTurn(getUnitFromName(pending.getActor()))) {
+            Label shown = new Label("Pending: " + pendingConfirmDescription);
+            shown.setStyle("-fx-text-fill: #dddddd; -fx-font-style: italic;");
+            Label why = new Label("You can't attack: you already attacked this turn.");
+            why.setStyle("-fx-text-fill: #ff9999; -fx-font-weight: bold;");
+            VBox box = new VBox(2, shown, why);
+            confirmContainer.getChildren().add(box);
+            return;
+        }
+
+        final Action action = confirmAction;
         BetterButton confirmBtn = new BetterButton("Confirm");
         confirmBtn.setPrefHeight(10);
         confirmBtn.setSuccessStyle();
-        confirmBtn.setOnAction(e -> showConfirmPopup(action, color, description));
-        confirmContainer.getChildren().addAll(confirmBtn);
+        confirmBtn.setOnAction(e -> {
+            if (!isMyActionTurn()) { renderConfirmButton(); return; }   // turn changed under us
+            if (action instanceof AttackAction a && alreadyAttackedThisTurn(getUnitFromName(a.getActor()))) {
+                renderConfirmButton();                                   // flag changed under us
+                return;
+            }
+            showConfirmPopup(action, pendingConfirmColor, pendingConfirmDescription);
+        });
+        confirmContainer.getChildren().add(confirmBtn);
     }
 
     private void showConfirmPopup(Action action, Color color, String description) {
@@ -2123,6 +2247,7 @@ public class Game {
         proceedBtn.setSuccessStyle();
         proceedBtn.setOnAction(e -> {
             SendAction(action);
+            if (action instanceof InventoryItemTransferAction) clearPreviewArrows();
             confirmAction = null;
             confirmContainer.getChildren().clear();
             popupStage.close();
@@ -2496,20 +2621,32 @@ public class Game {
 // ============================================================
 
     private void validateWeaponSelection() {
-        if (selectedAttackWeapon == null) { selectedAttackWeaponSlot = null; return; }
         FieldUnit unit = findUnitSilent(currentPlayer);
-        if (unit == null || unit.getSlots() == null) {
-            selectedAttackWeapon = null; selectedAttackWeaponSlot = null; return;
+        if (attackUnit != null && attackUnit != unit) {
+            LogMessage("Validate Weapon - The player now controls a different unit: nothing of the old selection is valid.");
+            clearAttackVisualization();
+            selectedAttackWeapon = null;
+            selectedAttackWeaponSlot = null;
+            attackUnarmedChosen = false;
+            return;
         }
-        if (selectedAttackWeaponSlot != null
-                && selectedAttackWeaponSlot.isActive()
-                && selectedAttackWeaponSlot.getItem() == selectedAttackWeapon) return;
-        for (Slot s : unit.getSlots()) {
-            if (s.isActive() && s.isIntact() && s.getItem() == selectedAttackWeapon) {
-                selectedAttackWeaponSlot = s; return;
+        if (selectedAttackWeapon == null) { selectedAttackWeaponSlot = null; return; }
+
+        if (unit != null && unit.getSlots() != null) {
+            if (selectedAttackWeaponSlot != null
+                    && selectedAttackWeaponSlot.isActive()
+                    && selectedAttackWeaponSlot.getItem() == selectedAttackWeapon) return;
+            for (Slot s : unit.getSlots()) {
+                if (s.isActive() && s.isIntact() && s.getItem() == selectedAttackWeapon) {
+                    selectedAttackWeaponSlot = s;
+                    return;
+                }
             }
         }
-        selectedAttackWeapon = null; selectedAttackWeaponSlot = null;
+        LogMessage("Validate Weapon - The Weapon was moved or removed");
+        selectedAttackWeapon = null;
+        selectedAttackWeaponSlot = null;
+        clearAttackVisualization();
     }
     /**
      * True when the weapon has a technology that can be toggled on/off via
@@ -2541,16 +2678,15 @@ public class Game {
         BetterButton neutralBtn = new BetterButton("Neutral (Unarmed)");
         neutralBtn.setPrimaryStyle();
         neutralBtn.setMaxWidth(Double.MAX_VALUE);
-        if (selectedAttackWeapon == null) {
+        if (attackUnarmedChosen && selectedAttackWeapon == null) {
             neutralBtn.setStyle("-fx-border-color: #8b0000; -fx-border-width: 3; -fx-border-radius: 4;");
         }
         neutralBtn.setOnAction(e -> {
+            if (attackUnarmedChosen && selectedAttackWeapon == null) return;   // already chosen
             selectedAttackWeapon = null;
             selectedAttackWeaponSlot = null;
-            clearAttackVisualization();
-            rebuildWeaponChooser();
-            rebuildAttackMenu();
-            autoSelectFirstProfile();
+            attackUnarmedChosen = true;
+            switchAttackSource();
         });
         attackWeaponChooserContainer.addNode(neutralBtn);
 
@@ -2571,46 +2707,40 @@ public class Game {
                     slotBtn.setStyle("-fx-border-color: #8b0000; -fx-border-width: 3; -fx-border-radius: 4;");
                 }
                 slotBtn.setOnAction(e -> {
+                    if (selectedAttackWeaponSlot == slot) return;              // already chosen: keep the profile
                     selectedAttackWeapon = weapon;
                     selectedAttackWeaponSlot = slot;
-                    clearAttackVisualization();
-                    rebuildWeaponChooser();
-                    rebuildAttackMenu();
-                    autoSelectFirstProfile();
+                    attackUnarmedChosen = false;
+                    switchAttackSource();
                 });
                 attackWeaponChooserContainer.addNode(slotBtn);
             }
+
             // ---- Tech-activation checkbox (only for N2 Shell / Maser) ----
             if (selectedAttackWeapon != null && hasActivatableTech(selectedAttackWeapon)) {
                 Weapon w = selectedAttackWeapon;
-                String techName = (w.getCurrentTech() == Weapon.Tech.N2SHELL)
-                        ? "N2 Shell" : "Maser";
+                String techName = (w.getCurrentTech() == Weapon.Tech.N2SHELL) ? "N2 Shell" : "Maser";
 
                 CheckBox activateTechCb = new CheckBox("Activate " + techName);
                 activateTechCb.setSelected(w.isActiveTech());
-                activateTechCb.setStyle(
-                        "-fx-font-weight: bold;" +
-                                "-fx-text-fill: #8b0000;" +
-                                "-fx-padding: 8 0 0 4;");
+                activateTechCb.setStyle("-fx-font-weight: bold; -fx-text-fill: #8b0000; -fx-padding: 8 0 0 4;");
                 activateTechCb.setTooltip(new Tooltip(
                         w.getCurrentTech() == Weapon.Tech.N2SHELL
                                 ? "N2 Shell: spend 1 extra Ammo to increase the Area rating by 1."
                                 : "Maser: spend 1 extra Ammo to gain Line and +1 additional Penetration."));
                 activateTechCb.setOnAction(e -> {
-                    w.SetActivateTech(activateTechCb.isSelected());
-
-                    // Profiles are rebuilt on demand by getWeaponProfiles(),
-                    // so clear the stale visualization and refresh the menu.
-                    clearAttackVisualization();
-                    rebuildAttackMenu();
-
-                    LocalMessage("Tech " + techName + " "
-                            + (activateTechCb.isSelected() ? "ACTIVATED" : "deactivated")
+                    boolean on = activateTechCb.isSelected();
+                    w.SetActivateTech(on);
+                    if (!refreshActiveProfile()) {          // new version unaffordable (e.g. the extra Ammo)
+                        w.SetActivateTech(!on);
+                        activateTechCb.setSelected(!on);
+                        return;
+                    }
+                    LogMessage("Tech " + techName + " " + (on ? "ACTIVATED" : "deactivated")
                             + " for " + w.getName() + ".");
                 });
                 attackWeaponChooserContainer.addNode(activateTechCb);
             }
-
         }
     }
 
@@ -2619,8 +2749,7 @@ public class Game {
         attackScrollContainer.clearNodes();
 
         Label header = new Label("Attack Actions");
-        header.setStyle("-fx-font-weight: bold; -fx-font-size: 14px; " +
-                "-fx-text-fill: #8b0000; -fx-padding: 0 0 4 0;");
+        header.setStyle("-fx-font-weight: bold; -fx-font-size: 14px; -fx-text-fill: #8b0000; -fx-padding: 0 0 4 0;");
         attackScrollContainer.addNode(header);
 
         FieldUnit unit = findUnitSilent(currentPlayer);
@@ -2631,22 +2760,20 @@ public class Game {
             return;
         }
 
-        String weaponName = (selectedAttackWeapon != null)
-                ? selectedAttackWeapon.getName() : "Neutral (Unarmed)";
+        if (!hasAttackSourceChosen()) {
+            Label hint = new Label("Choose a weapon (or Neutral) to see its attack profiles.");
+            hint.setWrapText(true);
+            hint.setStyle("-fx-text-fill: #666; -fx-font-style: italic;");
+            attackScrollContainer.addNode(hint);
+            return;
+        }
+
+        String weaponName = (selectedAttackWeapon != null) ? selectedAttackWeapon.getName() : "Neutral (Unarmed)";
         Label context = new Label("Using: " + weaponName);
         context.setStyle("-fx-font-style: italic; -fx-text-fill: #555; -fx-padding: 0 0 6 0;");
         attackScrollContainer.addNode(context);
 
-        List<AttackProfile> profiles = new ArrayList<>();
-        if (selectedAttackWeapon != null) {
-            List<AttackProfile> w = selectedAttackWeapon.getWeaponProfiles(selectedAttackWeapon.Technology.get(0));
-            if (w != null) profiles.addAll(w);
-        } else {
-            List<AttackProfile> u = unit.getUnitAttackProfiles();
-            if (u != null) profiles.addAll(u);
-        }
-        for (AttackProfile prof : profiles) turnIntoCombatProfile(prof, unit);
-
+        List<AttackProfile> profiles = getCurrentAttackProfiles(unit);
         if (profiles.isEmpty()) {
             Label empty = new Label("No attack profiles available.");
             empty.setStyle("-fx-text-fill: #666; -fx-font-style: italic;");
@@ -2655,119 +2782,107 @@ public class Game {
         }
 
         for (AttackProfile profile : profiles) {
-            VBox profileBox = new VBox(2);
-            String style = (activeAttackProfile == profile)
-                    ? "-fx-border-color: #8b0000; -fx-border-width: 2; -fx-padding: 4;"
-                    : "-fx-border-color: #cccccc; -fx-border-width: 1; -fx-padding: 4;";
-            profileBox.setStyle(style);
+            String reason = unusableReason(unit, profile);
+            boolean active = attackModeActive && isSameProfile(activeAttackProfile, profile);
+
+            VBox profileBox = new VBox(3);
+            profileBox.setStyle(active
+                    ? "-fx-border-color: #8b0000; -fx-border-width: 3; -fx-padding: 4;"
+                    : "-fx-border-color: #cccccc; -fx-border-width: 1; -fx-padding: 4;");
 
             BetterButton btn = new BetterButton(profile.name);
             btn.setPrimaryStyle();
             btn.setMaxWidth(Double.MAX_VALUE);
+            btn.setDisable(reason != null);
             btn.setOnAction(e -> startAttackVisualization(profile));
 
-            Label descLabel = new Label(describeProfileShort(profile));
+            Label descLabel = new Label(describeProfileDetailed(profile));
             descLabel.setWrapText(true);
-            descLabel.setStyle("-fx-font-size: 10px; -fx-text-fill: #333;");
+            descLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #222;");
 
             profileBox.getChildren().addAll(btn, descLabel);
+            if (reason != null) {
+                Label why = new Label("Unavailable: " + reason);
+                why.setWrapText(true);
+                why.setStyle("-fx-font-size: 11px; -fx-text-fill: #b00020; -fx-font-weight: bold;");
+                profileBox.getChildren().add(why);
+            }
             attackScrollContainer.addNode(profileBox);
         }
     }
 
-    /**
-     * Builds the profile list for the currently-selected weapon (or unarmed if
-     * none) and, if there is one, kicks off the visualization for the first
-     * profile. Safe to call repeatedly; startAttackVisualization() is a no-op if
-     * the profile is already active.
-     */
+    /** Shows the first profile the unit can actually use. Only called after a weapon / Neutral was picked. */
     private void autoSelectFirstProfile() {
         FieldUnit unit = findUnitSilent(currentPlayer);
         if (unit == null || !unit.isExists()) return;
-
-        List<AttackProfile> profiles = new ArrayList<>();
-        if (selectedAttackWeapon != null) {
-            List<AttackProfile> w = selectedAttackWeapon.getWeaponProfiles(
-                    selectedAttackWeapon.getCurrentTech());
-            if (w != null) profiles.addAll(w);
-        } else {
-            List<AttackProfile> u = unit.getUnitAttackProfiles();
-            if (u != null) profiles.addAll(u);
-        }
-        if (profiles.isEmpty()) return;
-
-        startAttackVisualization(profiles.get(0));
-    }
-
-    private String describeProfileShort(AttackProfile p) {
-        StringBuilder sb = new StringBuilder();
-        sb.append(p.Dice).append("d").append(p.Dicepower);
-        if (p.Power != 0) sb.append(p.Power > 0 ? "+" : "").append(p.Power);
-        sb.append("  |  Pen ").append(p.Penetration);
-        if (p.Stamina > 0)  sb.append("  |  Stam ").append(p.Stamina);
-        if (p.ATP > 0)      sb.append("  |  ATP ").append(p.ATP);
-        if (p.AmmoCost > 0) sb.append("  |  Ammo ").append(p.AmmoCost);
-        if (p.AreaType == -2)     sb.append("  |  Line");
-        else if (p.AreaType >= 0) sb.append("  |  Area ").append(p.AreaType);
-        if (p.Ranged) {
-            sb.append("  |  Rng ").append(p.MinRange).append("-").append(p.MaxRange);
-        } else if (p.MaxRange > 1) {
-            sb.append("  |  Reach ").append(p.MaxRange);
-        }
-        return sb.toString();
-    }
-
-    private String describeProfileFull(AttackProfile p) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("Profile: ").append(p.name).append("\n");
-        sb.append("Type: ").append(p.ProfileType).append("\n");
-        sb.append("Damage: ").append(p.Dice).append("d").append(p.Dicepower);
-        if (p.Power != 0) sb.append(" + ").append(p.Power);
-        sb.append("\n");
-        sb.append("Penetration: ").append(p.Penetration).append("\n");
-        sb.append("Stamina cost: ").append(p.Stamina).append("\n");
-        sb.append("ATP cost: ").append(p.ATP).append("\n");
-        if (p.AmmoCost > 0) sb.append("Ammo cost: ").append(p.AmmoCost).append("\n");
-        if (p.AreaType == -2) sb.append("Area: Line\n");
-        else if (p.AreaType >= 0) sb.append("Area: ").append(p.AreaType).append("\n");
-        sb.append("Range: ").append(p.MinRange).append(" - ").append(p.MaxRange).append("\n");
-        if (p.AttackProperties != null && !p.AttackProperties.isEmpty()) {
-            sb.append("Properties: ");
-            for (int i = 0; i < p.AttackProperties.size(); i++) {
-                if (i > 0) sb.append(", ");
-                sb.append(p.AttackProperties.get(i));
+        List<AttackProfile> profiles = getCurrentAttackProfiles(unit);
+        for (AttackProfile p : profiles) {
+            if (unusableReason(unit, p) == null) {
+                startAttackVisualization(p);
+                return;
             }
-            sb.append("\n");
         }
-        return sb.toString();
+        if (!profiles.isEmpty()) LocalMessage("None of this weapon's profiles can be used right now.");
     }
+
+    private static String fmtNum(double d) {
+        return d == Math.rint(d) ? String.valueOf((int) d) : String.format(Locale.US, "%.1f", d);
+    }
+
+    /** One-line description under a profile button: dice, penetration, tech, area/line, range, costs. */
+    private String describeProfileDetailed(AttackProfile p) {
+        List<String> parts = new ArrayList<>();
+
+        // Damage: xdn+s
+        StringBuilder dmg = new StringBuilder();
+        dmg.append(p.Dice).append("d").append(p.Dicepower);
+        if (p.Power != 0) dmg.append(p.Power > 0 ? "+" : "-").append(Math.abs(p.Power));
+        parts.add(dmg.toString());
+
+        // Penetration
+        parts.add("Penetration " + p.Penetration);
+
+        // Technology
+        Weapon w = selectedAttackWeapon;
+        if (w != null && w.getCurrentTech() != null && w.getCurrentTech() != Weapon.Tech.NONE) {
+            String tech = prettifyEnum(w.getCurrentTech().name());
+            if (hasActivatableTech(w)) tech += w.isActiveTech() ? " (on)" : " (off)";
+            parts.add(tech);
+        }
+
+        // Line / Area (nothing for a single target)
+        if (p.AreaType == -2) parts.add("Line");
+        else if (p.AreaType >= 0) parts.add("Area " + p.AreaType);
+
+        // Range
+        if (p.Ranged) parts.add("Range " + p.MinRange + "-" + p.MaxRange);
+        else if (p.MaxRange > 1) parts.add("Reach " + p.MaxRange);
+        else parts.add("Melee");
+
+        // Costs
+        if (p.Stamina > 0)  parts.add("Stamina " + p.Stamina);
+        if (p.ATP > 0)      parts.add("ATP " + p.ATP);
+        if (p.AmmoCost > 0) parts.add("Ammo " + p.AmmoCost);
+
+        return String.join(" | ", parts);
+    }
+
+
 
     private void startAttackVisualization(AttackProfile profile) {
         FieldUnit unit = findUnitSilent(currentPlayer);
         if (unit == null || !unit.isExists()) { LocalMessage("No unit to attack with."); return; }
 
-        QueuePosition current = queue.currentPosition();
-        if (current == null) { LocalMessage("No current turn in queue."); return; }
-        if (!currentPlayer.equalsIgnoreCase("DM") && !current.getUnitID().equals(currentPlayer)) {
-            LocalMessage("It's not your turn."); return;
-        }
 
-        if (attackModeActive && activeAttackProfile == profile && attackUnit == unit) {
-            clearAttackVisualization();
-            rebuildAttackMenu();
-            return;
-        }
+        // Already showing this profile: do nothing (no toggling off).
+        if (attackModeActive && attackUnit == unit && isSameProfile(activeAttackProfile, profile)) return;
 
-        if (unit.getStamina() < profile.Stamina) { LocalMessage("Not enough Stamina."); return; }
-        if (unit.getATP()     < profile.ATP)     { LocalMessage("Not enough ATP."); return; }
-        if (selectedAttackWeapon != null && profile.AmmoCost > 0
-                && selectedAttackWeapon.getAmmo() < profile.AmmoCost) {
-            LocalMessage("Not enough ammo (need " + profile.AmmoCost
-                    + ", have " + selectedAttackWeapon.getAmmo() + ")."); return;
-        }
+        String reason = unusableReason(unit, profile);
+        if (reason != null) { LocalMessage(reason + "."); return; }
 
         activeMoveMode = null;
         movementUnit = null;
+        discardPendingAttackConfirm();
         clearPreviewVisualisationLayer();
         clearPreviewArrows();
         pendingAttackHits.clear();
@@ -2799,7 +2914,8 @@ public class Game {
                 int ty = unit.getY() + dy;
                 if (!isOnBoard(tx, ty)) continue;
 
-                Color tint = (!isLine && isAttackBelowMinRange(profile, dist)) ? tooCloseTint : attackTint;
+                Color tint = isAttackBelowMinRange(profile, dist) ? tooCloseTint : attackTint;
+
                 addToPreviewVisualisationLayer(tx, ty, tint);
             }
         }
@@ -2828,6 +2944,7 @@ public class Game {
         attackUnit = null;
         pendingAttackHits.clear();
         attackVisualisationLayer.clear();
+        discardPendingAttackConfirm();
         clearPreviewArrows();
         clearPreviewVisualisationLayer();
     }
@@ -2853,16 +2970,7 @@ public class Game {
             return;
         }
 
-        // Turn check
-        QueuePosition current = queue.currentPosition();
-        if (current == null) {
-            LocalMessage("No current turn in queue.");
-            return;
-        }
-        if (!currentPlayer.equalsIgnoreCase("DM") && !current.getUnitID().equals(currentPlayer)) {
-            LocalMessage("It's not your turn.");
-            return;
-        }
+
 
         // Requirement checks per subtype
         int stamina = unit.getStamina();
@@ -2936,6 +3044,8 @@ public class Game {
     private void clearMovementVisualization() {
         activeMoveMode = null;
         movementUnit = null;
+        lastMoveClickX = -1;
+        lastMoveClickY = -1;
         clearPreviewArrows();
         clearPreviewVisualisationLayer();
     }
@@ -4014,16 +4124,55 @@ public class Game {
     }
 
     private boolean nameIsPicked(String name, GameState gamestate1) {
-        boolean picked = false;
-        for (Action action : gamestate1.getActions()) {
-            if (action instanceof AddPlayerAction action1 && action1.getUnitName().equals(name)) {picked = true;
-            break;}
+        if (name.equalsIgnoreCase("DM")) return true;
+        if (gamestate1 != null) {
+            for (Action action : gamestate1.getActions()) {
+                if (action instanceof AddPlayerAction ap && ap.getUnitName().equalsIgnoreCase(name)) return true;
+            }
         }
-        if (!UnitList.isEmpty()) {
         for (FieldUnit unit : UnitList) {
-            if (unit.getName().equals(name)) {picked = true; break;}
-        }}
-        return picked;
+            if (unit.getName().equalsIgnoreCase(name)) return true;
+        }
+        return false;
+    }
+
+    /** Spawn points of players the DM already added but who have no unit yet. */
+    private Set<Cell> reservedSpawnCells() {
+        Set<Cell> reserved = new HashSet<>();
+        if (gamestate == null) return reserved;
+        for (Action a : gamestate.getActions()) {
+            if (!(a instanceof AddPlayerAction ap)) continue;
+            boolean hasUnit = false;
+            for (FieldUnit u : UnitList) {
+                if (u.getName().equals(ap.getUnitName())) { hasUnit = true; break; }
+            }
+            if (!hasUnit) reserved.add(new Cell(ap.getX(), ap.getY()));
+        }
+        return reserved;
+    }
+
+    /** True if a living unit stands on (x,y) or a pending player is going to spawn there. */
+    private boolean isSpawnCellTaken(int x, int y) {
+        if (getUnitAt(x, y) != null) return true;
+        return reservedSpawnCells().contains(new Cell(x, y));
+    }
+
+    private Integer parseIntOrNull(String s) {
+        try { return Integer.parseInt(s.trim()); }
+        catch (NumberFormatException e) { return null; }
+    }
+
+    /** Grey = reserved by a pending player, green/red = the sector currently chosen. */
+    private void refreshSpawnMarkers(Integer selX, Integer selY) {
+        previewVisualisationLayer.clear();
+        for (Cell c : reservedSpawnCells()) {
+            addToPreviewVisualisationLayer(c.x(), c.y(), Color.rgb(150, 150, 150));
+        }
+        if (selX != null && selY != null && isOnBoard(selX, selY)) {
+            addToPreviewVisualisationLayer(selX, selY,
+                    isSpawnCellTaken(selX, selY) ? Color.RED : Color.LIMEGREEN);
+        }
+        applyVisualisation();
     }
 
     private Node buildDMSetupContent(Button confirmBtn, Stage popupStage, Action cause) {
@@ -4033,32 +4182,48 @@ public class Game {
         TextField nameField = new TextField();
         nameField.setPromptText("Player name");
         TextField xField = new TextField();
-        xField.setPromptText("X (0-" + (battlefield.sizeX-1) + ")");
+        xField.setPromptText("X (0-" + (battlefield.sizeX - 1) + ")");
         TextField yField = new TextField();
-        yField.setPromptText("Y (0-" + (battlefield.sizeY-1) + ")");
+        yField.setPromptText("Y (0-" + (battlefield.sizeY - 1) + ")");
 
-        // ---- Team input only shown in TEAM / CUSTOM ----
         TextField teamField = new TextField();
         teamField.setPromptText("Team #");
         boolean manualTeam = (gameMode == GameState.GAME_MODE.TEAM
                 || gameMode == GameState.GAME_MODE.CUSTOM);
 
+        Label hint = new Label("Tip: click a sector on the Battlefield tab to fill in X and Y.");
+        hint.setWrapText(true);
+        hint.setMaxWidth(340);
+        hint.setStyle("-fx-font-style: italic; -fx-text-fill: #555;");
+
+        Label problemLabel = new Label();
+        problemLabel.setWrapText(true);
+        problemLabel.setMaxWidth(340);
+        problemLabel.setStyle("-fx-text-fill: #b00020; -fx-font-weight: bold;");
+
         Runnable validate = () -> {
-            boolean valid = false;
             String name = nameField.getText().trim();
-            if (!name.isEmpty() && !nameIsPicked(name, gamestate)) {
-                try {
-                    int x = Integer.parseInt(xField.getText().trim());
-                    int y = Integer.parseInt(yField.getText().trim());
-                    if (x >= 0 && x < battlefield.sizeX && y >= 0 && y < battlefield.sizeY) {
-                        if (manualTeam) {
-                            Integer.parseInt(teamField.getText().trim()); // must parse
-                        }
-                        valid = true;
-                    }
-                } catch (NumberFormatException ignored) { }
+            Integer x = parseIntOrNull(xField.getText());
+            Integer y = parseIntOrNull(yField.getText());
+            String problem = null;
+
+            if (name.isEmpty()) {
+                problem = "Enter a player name.";
+            } else if (nameIsPicked(name, gamestate)) {
+                problem = "The name '" + name + "' is already used by another player or unit.";
+            } else if (x == null || y == null) {
+                problem = "Click a sector on the battlefield, or enter X and Y.";
+            } else if (!isOnBoard(x, y)) {
+                problem = "Coordinates are outside the board.";
+            } else if (isSpawnCellTaken(x, y)) {
+                problem = "Sector " + CordsToText(x, y) + " is occupied or reserved for another player.";
+            } else if (manualTeam && parseIntOrNull(teamField.getText()) == null) {
+                problem = "Enter a team number.";
             }
-            confirmBtn.setDisable(!valid);
+
+            problemLabel.setText(problem == null ? "" : problem);
+            confirmBtn.setDisable(problem != null);
+            refreshSpawnMarkers(x, y);
         };
 
         nameField.textProperty().addListener((o, a, b) -> validate.run());
@@ -4066,7 +4231,20 @@ public class Game {
         yField.textProperty().addListener((o, a, b) -> validate.run());
         teamField.textProperty().addListener((o, a, b) -> validate.run());
 
+        // Board clicks fill X/Y while this popup is open
+        spawnPickHandler = (cx, cy) -> {
+            xField.setText(String.valueOf(cx));
+            yField.setText(String.valueOf(cy));
+        };
+        popupStage.setOnHidden(e -> {
+            spawnPickHandler = null;
+            clearPreviewVisualisationLayer();
+        });
+
         confirmBtn.setOnAction(e -> {
+            validate.run();                       // the state may have changed since the last keystroke
+            if (confirmBtn.isDisable()) return;
+
             String name = nameField.getText().trim();
             int x = Integer.parseInt(xField.getText().trim());
             int y = Integer.parseInt(yField.getText().trim());
@@ -4077,7 +4255,7 @@ public class Game {
                 case FFA -> {
                     long existing = gamestate.getActions().stream()
                             .filter(a -> a instanceof AddPlayerAction).count();
-                    team = (int) existing + 1;   // first FFA player -> team 1
+                    team = (int) existing + 1;
                 }
                 default -> team = Integer.parseInt(teamField.getText().trim());
             }
@@ -4091,6 +4269,7 @@ public class Game {
 
         vbox.getChildren().addAll(
                 new Label("Enter player name and starting position:"),
+                hint,
                 new HBox(10, new Label("Name:"), nameField),
                 new HBox(10, new Label("X:"), xField),
                 new HBox(10, new Label("Y:"), yField)
@@ -4098,6 +4277,9 @@ public class Game {
         if (manualTeam) {
             vbox.getChildren().add(new HBox(10, new Label("Team:"), teamField));
         }
+        vbox.getChildren().add(problemLabel);
+
+        validate.run();   // sets the initial state and shows the grey reserved sectors
         return vbox;
     }
 
@@ -4263,15 +4445,55 @@ public class Game {
         if (topBar == null) return;
 
         boolean isMyTurn = activePlayer != null && activePlayer.equals(currentPlayer);
+        boolean canAct = isMyActionTurn();
 
-        if (isMyTurn) {
-            topBar.setStyle("-fx-background-color: #2e7d32;");
-        } else {
-            topBar.setStyle("-fx-background-color: #444444;");
+        topBar.setStyle(isMyTurn ? (canAct ? "-fx-background-color: #2e7d32;" : "-fx-background-color: #d1cc47;") : "-fx-background-color: #444444;");
+
+        boolean justBecameAvailable = canAct && !couldActLastCheck;
+        couldActLastCheck = canAct;
+        updateTurnEndButton(canAct);
+
+        if (justBecameAvailable && confirmAction != null) {
+            revalidatePendingActionForTurn();
+        }
+        renderConfirmButton();
+        updateAttackButtonState();
+    }
+    /**
+     * Your turn just started and an action was prepared earlier. Positions, stamina, ATP and
+     * ammo may have changed, so rebuild the preview from scratch and re-click the same sectors.
+     */
+    private void revalidatePendingActionForTurn() {
+        if (confirmAction instanceof AttackAction) {
+            if (!refreshActiveProfile()) {              // existing method: re-creates zone + clicks, rebuilds Confirm
+                clearAttackVisualization();
+                LocalMessage("Your prepared attack is no longer possible.");
+            }
+            return;
         }
 
-        updateTurnEndButton(isMyTurn);
+        if (confirmAction instanceof MoveAction) {
+            if (activeMoveMode == null || movementUnit == null || lastMoveClickX < 0) {
+                confirmAction = null;                   // stale leftover from a cleared visualization
+                return;
+            }
+            MoveAction.MOVEMENTTYPE mode = activeMoveMode;
+            int cx = lastMoveClickX, cy = lastMoveClickY;
+
+            clearMovementVisualization();
+            confirmAction = null;
+            startMoveVisualization(mode);
+
+            if (activeMoveMode != null && isInPreviewVisualisationLayer(cx, cy)) {
+                handleMovementSectorClick(cx, cy);      // builds the new pending MoveAction
+            } else {
+                clearMovementVisualization();
+                LocalMessage("Your prepared move is no longer possible.");
+            }
+        }
+        // Other pending actions (inventory drags) are kept as they are.
     }
+
 
     /** Adds or removes the grey "Turn End" button depending on whose turn it is. */
     private void updateTurnEndButton(boolean isMyTurn) {
@@ -4764,7 +4986,7 @@ public class Game {
                 double ey = evaUnit.getY() * 20 + 10;
                 Arrow arrow = new Arrow(boardContainer, Color.CORNFLOWERBLUE, sx, sy, ex, ey,
                         Arrow.ArrowType.PREVIEW);
-                arrows.add(arrow);
+                registerArrow(arrow);
             }
             confirmAction = InventoryItemTransferAction.pickUpAction(currentActionNumber+1, currentPlayer,
                     ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(toSlot), draggedFromField.getX()- evaUnit.getX(),
@@ -4792,7 +5014,7 @@ public class Game {
             double ey = y * 20 + 10;
             Arrow arrow = new Arrow(boardContainer, Color.ORANGE, sx, sy, ex, ey,
                     Arrow.ArrowType.PREVIEW);
-            arrows.add(arrow);
+            registerArrow(arrow);
         }
         confirmAction = InventoryItemTransferAction.dropAction(currentActionNumber+1, currentPlayer,
                 ((Evangelion) evaUnit.getUnit()).getSlots().indexOf(fromSlot), x- evaUnit.getX(), y- evaUnit.getY());
@@ -4879,12 +5101,48 @@ public class Game {
 
 
 
-    public void clearPreviewArrows(){
-        for (Arrow arrow : arrows) {
-            if (arrow.getArrowType().equals(Arrow.ArrowType.PREVIEW)) arrow.delete();
+    public void clearPreviewArrows() {
+        Iterator<Arrow> it = arrows.iterator();
+        while (it.hasNext()) {
+            Arrow a = it.next();
+            if (a.getArrowType() == Arrow.ArrowType.PREVIEW) {
+                a.delete();
+                it.remove();
+            }
         }
     }
 
+
+    private int absoluteTurn(int round, int turn) {
+        return roundStartOffset.getOrDefault(round, 0) + turn;
+    }
+
+    /** Every ACTION arrow gets the Round / Turn it was created in. */
+    private void registerArrow(Arrow a) {
+        a.setCreatedAt(CurrentRound, CurrentTurn);
+        LogMessage("Arrow " + a.getArrowType() + " stamped R" + CurrentRound + " T" + CurrentTurn);
+        arrows.add(a);
+    }
+
+    /** Removes ACTION arrows that are at least `arrowLifetimeTurns` turns old. 0 = keep forever. */
+    private void pruneActionArrows() {
+        int limit = options.arrowLifetimeTurns;
+        if (limit <= 0) return;
+        int now = absoluteTurn(CurrentRound, CurrentTurn);
+        Iterator<Arrow> it = arrows.iterator();
+        while (it.hasNext()) {
+            Arrow a = it.next();
+            if (a.getArrowType() != Arrow.ArrowType.ACTION) continue;
+            if (a.getRound() < 0) {
+                a.setCreatedAt(CurrentRound, CurrentTurn);
+                continue;
+            }
+            if (now - absoluteTurn(a.getRound(), a.getTurn()) >= limit) {
+                a.delete();
+                it.remove();
+            }
+        }
+    }
 
     private void rebuildInventoryTab() {
         LogMessage("Attempting to rebuild inventory tab");
@@ -5149,7 +5407,7 @@ public class Game {
 
         Arrow arrow = new Arrow(parent, color, sx, sy, ex, ey, Arrow.ArrowType.PREVIEW);
         arrow.DrawArrowUI(sx, sy, ex, ey);   // explicit polygon points, no rotate/layout
-        arrows.add(arrow);
+        registerArrow(arrow);
         return arrow;
     }
 
@@ -5229,6 +5487,8 @@ public class Game {
      *   2 = FULL     – COMBAT + team / position / effects / turn-done
      */
     private int statsMode = 1;
+    private BetterButton attackBtn;
+    private String attackBtnDefaultStyle = "";
     // ---- Battlefield tab ----
     private VBox buildBattlefieldTab() {
         VBox wrapper = new VBox(10);
@@ -5464,8 +5724,9 @@ public class Game {
         moveBtn.setPrimaryStyle();
         moveBtn.setMaxWidth(Double.MAX_VALUE);
 
-        BetterButton attackBtn = new BetterButton("Attack");
+        attackBtn = new BetterButton("Attack");
         attackBtn.setPrimaryStyle();
+        attackBtnDefaultStyle = attackBtn.getStyle();
         attackBtn.setMaxWidth(Double.MAX_VALUE);
 
         BetterButton atPowerBtn = new BetterButton("ATPowers");
@@ -5570,17 +5831,25 @@ public class Game {
             startMoveVisualization(MoveAction.MOVEMENTTYPE.RUN);
         });
         attackBtn.setOnAction(e -> {
+            // Already open: do nothing
+            if (attackScrollContainer.isVisible() && attackWeaponChooserContainer.isVisible()) return;
+
             clearMovementVisualization();
             moveScrollContainer.setVisible(false);
             attackScrollContainer.setVisible(true);
             atPowerScrollContainer.setVisible(false);
             otherScrollContainer.setVisible(false);
             attackWeaponChooserContainer.setVisible(true);
-            autoSelectFirstWeapon();
+
+            // Fresh start: nothing is selected, the player has to pick a weapon / Neutral
+            clearAttackVisualization();
+            selectedAttackWeapon = null;
+            selectedAttackWeaponSlot = null;
+            attackUnarmedChosen = false;
             rebuildWeaponChooser();
             rebuildAttackMenu();
-            autoSelectFirstProfile();
         });
+
         atPowerBtn.setOnAction(e -> {
             clearAttackVisualization();
             moveScrollContainer.setVisible(false);
@@ -5640,6 +5909,131 @@ public class Game {
         wrapper.getChildren().add(battlePane);
         return wrapper;
 
+    }
+
+    /** Grey while it's your turn and the unit already used its Attack Action. */
+    private void updateAttackButtonState() {
+        if (attackBtn == null) return;
+        FieldUnit u = findUnitSilent(currentPlayer);
+        boolean blocked = alreadyAttackedThisTurn(u);
+
+        if (blocked) {
+            attackBtn.setStyle("-fx-background-color: #9e9e9e; -fx-text-fill: #eeeeee; -fx-background-radius: 4;");
+            attackBtn.setTooltip(new Tooltip("You already attacked this turn. You can still preview attacks."));
+        } else {
+            attackBtn.setStyle(attackBtnDefaultStyle);
+            attackBtn.setTooltip(null);
+        }
+    }
+
+    /** Profiles are rebuilt constantly, so identity (==) is useless. Name + type is stable within one weapon. */
+    private boolean isSameProfile(AttackProfile a, AttackProfile b) {
+        return a != null && b != null && a.ProfileType == b.ProfileType && Objects.equals(a.name, b.name);
+    }
+
+    private boolean hasAttackSourceChosen() {
+        return selectedAttackWeapon != null || attackUnarmedChosen;
+    }
+
+    /** The ONE place that builds the profile list (with Attack Strength applied). Empty if nothing is chosen. */
+    private List<AttackProfile> getCurrentAttackProfiles(FieldUnit unit) {
+        List<AttackProfile> profiles = new ArrayList<>();
+        if (selectedAttackWeapon != null) {
+            List<AttackProfile> w = selectedAttackWeapon.getWeaponProfiles(selectedAttackWeapon.getCurrentTech());
+            if (w != null) profiles.addAll(w);
+        } else if (attackUnarmedChosen) {
+            List<AttackProfile> u = unit.getUnitAttackProfiles();
+            if (u != null) profiles.addAll(u);
+        }
+        for (AttackProfile p : profiles) turnIntoCombatProfile(p, unit);
+        return profiles;
+    }
+
+    /** null = usable, otherwise the reason it can't be used right now. */
+    private String unusableReason(FieldUnit unit, AttackProfile p) {
+        if (unit.getStamina() < p.Stamina)
+            return "Not enough Stamina (need " + p.Stamina + ", have " + unit.getStamina() + ")";
+        if (unit.getATP() < p.ATP)
+            return "Not enough ATP (need " + p.ATP + ", have " + unit.getATP() + ")";
+        if (selectedAttackWeapon != null && p.AmmoCost > 0 && selectedAttackWeapon.getAmmo() < p.AmmoCost)
+            return "Not enough Ammo (need " + p.AmmoCost + ", have " + selectedAttackWeapon.getAmmo() + ")";
+        return null;
+    }
+
+    /** A pending attack confirm belongs to the visualization, so it goes away with it. */
+    private void discardPendingAttackConfirm() {
+        if (confirmAction instanceof AttackAction) {
+            confirmAction = null;
+            if (confirmContainer != null) confirmContainer.getChildren().clear();
+        }
+    }
+
+    /** Weapon (or Neutral) was changed: drop the old visualization, rebuild, show the first usable profile. */
+    private void switchAttackSource() {
+        clearAttackVisualization();
+        rebuildWeaponChooser();
+        rebuildAttackMenu();
+        autoSelectFirstProfile();
+    }
+
+    /** Same profile after its stats changed (tech toggled): clear and show the new version of it. */
+    /**
+     * The active profile's stats changed (N2 Shell / Maser toggled). Re-creates the pending attack
+     * at the same clicked sectors with the new stats. Clicks that are no longer valid
+     * (e.g. not on a straight line once the profile became a Line) are removed.
+     * Returns false (and changes nothing) if the new version can't be used.
+     */
+    private boolean refreshActiveProfile() {
+        FieldUnit unit = findUnitSilent(currentPlayer);
+        if (unit == null || !attackModeActive || activeAttackProfile == null || attackUnit != unit) {
+            rebuildAttackMenu();        // nothing shown yet, just refresh descriptions
+            return true;
+        }
+
+        AttackProfile old = activeAttackProfile;
+        List<AttackProfile> profiles = getCurrentAttackProfiles(unit);
+
+        // Find the new version of the same profile (by name, otherwise by type if that's unambiguous)
+        AttackProfile fresh = null;
+        for (AttackProfile p : profiles) {
+            if (isSameProfile(p, old)) { fresh = p; break; }
+        }
+        if (fresh == null) {
+            int matches = 0;
+            for (AttackProfile p : profiles) {
+                if (p.ProfileType == old.ProfileType) { fresh = p; matches++; }
+            }
+            if (matches != 1) fresh = null;
+        }
+        if (fresh == null) {
+            clearAttackVisualization();
+            rebuildAttackMenu();
+            LocalMessage("The profile changed and can't be matched any more. Choose a profile again.");
+            return true;
+        }
+
+        String reason = unusableReason(unit, fresh);
+        if (reason != null) {
+            LocalMessage(reason + ".");
+            return false;               // caller reverts the toggle
+        }
+
+        // Remember where the player clicked (not where the hits were resolved to)
+        List<int[]> clicks = new ArrayList<>();
+        for (PendingHit h : pendingAttackHits) clicks.add(new int[]{h.clickX(), h.clickY()});
+
+        clearAttackVisualization();
+        startAttackVisualization(fresh);        // new range zone (straight lines only for a Line)
+
+        int removed = 0;
+        for (int[] c : clicks) {
+            if (!isInPreviewVisualisationLayer(c[0], c[1])) { removed++; continue; }
+            handleAttackSectorClick(c[0], c[1]);   // rebuilds arrows, highlights and the Confirm button
+        }
+        if (removed > 0) {
+            LocalMessage(removed + " hit location(s) can't be used with the changed attack and were removed.");
+        }
+        return true;
     }
 
     /**
@@ -5886,6 +6280,7 @@ public class Game {
         refreshStatsContainers();
     }
 
+
     // ---- Bottom Button Bar (unchanged) ----
     // ---- Bottom Button Bar ----
     private HBox buildButtonBar() {
@@ -5992,6 +6387,9 @@ public class Game {
                 double w = Double.parseDouble(widthField.getText());
                 double h = Double.parseDouble(heightField.getText());
                 resizeViewport(w, h);
+                options.viewportWidth = viewport.getPrefWidth();     // NEW (after clamping)
+                options.viewportHeight = viewport.getPrefHeight();
+                saveOptions();                                       // NEW
             } catch (NumberFormatException ex) {
                 Alert alert = new Alert(Alert.AlertType.ERROR, "Please enter valid numbers.");
                 alert.showAndWait();
@@ -6019,15 +6417,24 @@ public class Game {
             }
         });
 
-        // ---- Assemble all ----
+
+
+
+        Label arrowLabel = new Label("Action arrows disappear after (turns, 0 = never):");
+        Spinner<Integer> arrowSpinner = new Spinner<>(0, GameOptions.MAX_ARROW_LIFETIME, options.arrowLifetimeTurns);
+        arrowSpinner.setEditable(true);
+
         content.getChildren().addAll(
                 speedLabel, speedSlider, fastCheck,
                 new Separator(),
                 viewportLabel,
                 resizeGrid, resizeBtnBox,
                 new Separator(),
-                heightLabel, heightSlider
+                heightLabel, heightSlider,
+                new Separator(),
+                arrowLabel, arrowSpinner          // NEW
         );
+
 
         dialog.getDialogPane().setContent(content);
         dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
@@ -6036,12 +6443,17 @@ public class Game {
             if (buttonType == ButtonType.OK) {
                 this.actionSpeed = speedSlider.getValue();
                 this.fastActions = fastCheck.isSelected();
+                try { arrowSpinner.increment(0); } catch (Exception ignored) { }   // commits typed text
+                options.arrowLifetimeTurns = arrowSpinner.getValue();
+                pruneActionArrows();
                 LogMessage("Speed set to " + actionSpeed + "x, FastActions: " + fastActions);
             }
             return null;
         });
 
         dialog.showAndWait();
+        saveOptions();
+
     }
 
     private void showTab(VBox tab) {
@@ -6130,11 +6542,16 @@ public class Game {
     }
 
     private void resizeViewport(double newWidth, double newHeight) {
+        if (viewport == null) return;
         newWidth = Math.max(newWidth, 100);
         newHeight = Math.max(newHeight, 100);
         viewport.setPrefSize(newWidth, newHeight);
         viewport.setMaxSize(newWidth, newHeight);
         updateSliderRanges();
+    }
+    private void saveOptions() {
+        options.bottomPanelHeight = bottomPanelHeight;
+        options.save();
     }
 
     private boolean popupShowing = false;
@@ -6236,7 +6653,7 @@ public class Game {
         double newCy = newY * 20 + 10;
 
         Arrow arrow = new Arrow(boardContainer, color, oldCx, oldCy, oldCx, oldCy, type);
-        arrows.add(arrow);
+        registerArrow(arrow);
         DoubleProperty progress = new SimpleDoubleProperty(0);
         progress.addListener((obs, oldVal, newVal) -> {
             double fraction = newVal.doubleValue();
@@ -6608,7 +7025,7 @@ public class Game {
     }
 
     private GameState CorruptedStateAttemptedFix(GameState corrupted) {
-        LogError("ERROR - CORRUPTED GameState: duplicate action numbers found. Attempting to fix by renumbering.");
+        LogError("ERROR - CORRUPTED GameState: duplicate action numbers found. Attempting to fix by renumbering. Backup saved");
 
 
         // Group actions by number, remembering their position in the list

@@ -19,6 +19,16 @@ public class Arrow extends Line {
         NONE
     }
 
+    public ArrowType arrowType = ArrowType.NONE;     // was: public ArrowType arrowType;
+
+    private int round = -1;
+    private int turn = -1;
+
+    /** Round / Turn this arrow was created in. */
+    public void setCreatedAt(int round, int turn) { this.round = round; this.turn = turn; }
+    public int getRound() { return round; }
+    public int getTurn() { return turn; }
+
     public Polygon getTriangle() {
         return triangle;
     }
@@ -55,7 +65,6 @@ public class Arrow extends Line {
         canvas(endX, endY);
     }
 
-    public ArrowType arrowType;
 
     public ArrowType getArrowType() {
         return arrowType;

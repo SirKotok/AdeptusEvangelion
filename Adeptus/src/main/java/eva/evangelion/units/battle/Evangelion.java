@@ -35,7 +35,7 @@ public class Evangelion extends Unit{
             double p = Math.random();
             Weapon test;
             if (p > 0.5) test = Weapon.createBasicMeleeWeapon("weapon #"+i, "Knife", Weapon.Tech.NONE, new ArrayList<>(), Weapon.Hand.ONE_HANDED);
-            else test = Weapon.createBasicRangedWeapon("weapon #"+i, "Knife", Weapon.Tech.NONE, new ArrayList<>(), Weapon.Hand.ONE_HANDED, 2, 4, 6);
+            else test = Weapon.createBasicRangedWeapon("weapon #"+i, "SMG", Weapon.Tech.NONE, new ArrayList<>(), Weapon.Hand.ONE_HANDED, 2, 4, 6);
             test.WeaponProperties.add(Weapon.WeaponProperty.SMALL);
             p = Math.random();
             if (test.isRanged()) {

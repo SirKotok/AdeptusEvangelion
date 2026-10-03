@@ -48,6 +48,7 @@ public class FieldUnit {
     public int ATP;
     public int maxATP = 1;
     public boolean usedTactical = false;
+    public boolean hasAttacked = false;
     /** All currently-active modifiers on this unit. */
     private final List<Effect> CurrentEffects = new ArrayList<>();
 
@@ -89,6 +90,14 @@ public class FieldUnit {
 
     public int getStamina() {
         return Stamina;
+    }
+
+    public boolean canAttack() {
+        return !hasAttacked;
+    }
+
+    public void setHasAttacked(boolean hasAttacked) {
+        this.hasAttacked = hasAttacked;
     }
 
     public void setATP(int ATP) {
