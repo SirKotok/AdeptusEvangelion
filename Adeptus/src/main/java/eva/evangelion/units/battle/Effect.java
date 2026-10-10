@@ -90,6 +90,7 @@ public class Effect implements Serializable {
     }
 
 
+    public void setStacks(boolean stacks) { this.stacks = stacks; }
 
     public boolean isStacks() { return stacks; }
 

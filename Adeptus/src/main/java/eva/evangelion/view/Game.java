@@ -7,6 +7,7 @@ import eva.evangelion.items.Weapon.AttackProfile;
 import eva.evangelion.items.Weapon.Weapon;
 import eva.evangelion.state.GameStateStore;
 import eva.evangelion.units.battle.*;
+import eva.evangelion.view.UIElements.EffectEditor;
 import eva.evangelion.view.options.GameOptions;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
@@ -194,6 +195,9 @@ public class Game {
     private boolean initialLoad = true;
 
 
+    private EffectEditor dmEffectEditor;
+    private ComboBox<String> dmEffectTargetCombo;
+
     /** Fast if the user chose fast actions, or if we are loading a game. */
     private boolean isFast() {
         return fastActions || initialReload;
@@ -243,7 +247,7 @@ public class Game {
 
         weaponCreatorTab = new VBox();
         weaponCreatorTab.setPadding(new Insets(10));
-        WeaponCreatorUI weaponCreatorUI = new WeaponCreatorUI();
+        WeaponCreatorUI weaponCreatorUI = new WeaponCreatorUI(true);
         weaponCreatorTab.getChildren().add(weaponCreatorUI);
 
         centerStack.getChildren().addAll(battlefieldTab, inventoryTab, chatTab, dmTab, weaponCreatorTab);
@@ -505,14 +509,16 @@ public class Game {
         processActionCost(action);
         if (action instanceof MoveAction) {
             processMoveAction((MoveAction) action);
+        } else if (action instanceof DMAddWeaponAction) {
+            processDMAddWeaponAction((DMAddWeaponAction) action);
+        } else if (action instanceof DMAddEffectAction) {
+            processDMAddEffectAction((DMAddEffectAction) action);
         } else if (action instanceof AttackAction) {
             processAttackAction((AttackAction) action);
         } else if (action instanceof DMChoosePlayerAction) {
             processDMChoosePlayerAction((DMChoosePlayerAction) action);
         } else if (action instanceof DMCreateUnitAction) {
             processDMCreateUnitAction((DMCreateUnitAction) action);
-        } else if (action instanceof DMGiveWeaponAction) {
-            processDMGiveWeaponAction((DMGiveWeaponAction) action);
         }  else if (action instanceof EndRoundAction) {
             processForcedRoundEnd((EndRoundAction) action);
         } else if (action instanceof DMDeleteUnitAction) {
@@ -1558,68 +1564,105 @@ public class Game {
     }
 
 
+
+
+
     /**
-     * Replaces whatever item is currently in the given slot of the target
-     * Evangelion with the {@link Weapon} carried inside the action.
-     *
-     * The DM client loads the weapon from disk when the command is issued;
-     * the object then travels through the GameState serialization like any
-     * other action payload, so the receiving side never needs file access.
+     * Deep copy through serialization. The weapon/effect inside an action must never be the live
+     * object: ammo spent or effects added later would be written back into the action on the next
+     * saveGameState() and then be applied a second time when the game is replayed.
      */
-    private void processDMGiveWeaponAction(DMGiveWeaponAction action) {
-        DMQueueInsertion(action, "DM_GIVE_WEAPON");
-
-        FieldUnit target = getUnitFromName(action.getTargetUnitName());
-        if (target == null || !target.isExists()) {
-            LogMessage("DMGiveWeaponAction failed: unit '" + action.getTargetUnitName() + "' not found.");
-            return;
-        }
-        if (!(target.getUnit() instanceof Evangelion eva)) {
-            LogMessage("DMGiveWeaponAction failed: '" + target.getName() + "' is not an Evangelion.");
-            return;
-        }
-
-        Weapon weapon = action.getWeapon();
-        if (weapon == null) {
-            LogMessage("DMGiveWeaponAction failed: action carries no weapon.");
-            return;
-        }
-
-        List<Slot> slots = eva.getSlots();
-        int slotNum = action.getSlotNumber();
-        if (slotNum < 0 || slotNum >= slots.size()) {
-            LogMessage("DMGiveWeaponAction failed: slot " + slotNum
-                    + " out of range (0-" + (slots.size() - 1) + ").");
-            return;
-        }
-
-        Slot slot = slots.get(slotNum);
-        Item old = slot.getItem();
-        if (old != null) {
-            LogMessage("DMGiveWeaponAction: replacing '" + old.getName()
-                    + "' in slot " + slot.getName());
-        }
-        slot.setItem(weapon);
-        LogMessage("DMGiveWeaponAction: gave '" + weapon.getName()
-                + "' to " + target.getName()
-                + " in slot " + slot.getName() + " (#" + slotNum + ").");
-
-        if (target.getName().equals(currentPlayer)) {
-            rebuildInventoryTab();
+    @SuppressWarnings("unchecked")
+    private <T> T deepCopy(T original) {
+        try (ByteArrayOutputStream bos = new ByteArrayOutputStream();
+             ObjectOutputStream oos = new ObjectOutputStream(bos)) {
+            oos.writeObject(original);
+            oos.flush();
+            try (ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(bos.toByteArray()))) {
+                return (T) ois.readObject();
+            }
+        } catch (IOException | ClassNotFoundException e) {
+            LogMessage("deepCopy failed: " + e.getMessage());
+            return null;
         }
     }
 
-    /**
-     * Loads a serialized {@link Weapon} from {@code Active/weapons/}.
-     * Accepts the raw name (with spaces / punctuation), the already sanitized
-     * name, or a name ending in {@code .ser}.
-     *
-     * Only invoked by the DM client when issuing the giveWeapon command —
-     * the loaded weapon is then embedded in a {@link DMGiveWeaponAction} and
-     * shipped through the GameState.
-     *
-     * @return the weapon, or {@code null} if it could not be found / read.
-     */
+    private void processDMAddWeaponAction(DMAddWeaponAction action) {
+        DMQueueInsertion(action, "DM_ADD_WEAPON");
+
+        Weapon weapon = action.getWeapon() == null ? null : deepCopy(action.getWeapon());
+        if (weapon == null) {
+            LogError("DMAddWeaponAction failed: action carries no readable weapon.\n");
+            return;
+        }
+
+        if (action.getPlacement() == DMAddWeaponAction.Placement.FIELD) {
+            int x = action.getX(), y = action.getY();
+            if (!isOnBoard(x, y)) {
+                LogError("DMAddWeaponAction failed: (" + x + "," + y + ") is out of bounds.\n");
+                return;
+            }
+            if (getFieldItemAt(x, y) != null) {
+                LogError("DMAddWeaponAction failed: there is already an item at (" + x + "," + y + ").\n");
+                return;
+            }
+            createFieldItemAt(weapon, x, y);
+            LogMessage("DMAddWeaponAction: placed '" + weapon.getName() + "' at (" + x + "," + y + ").");
+            return;
+        }
+
+        FieldUnit target = getUnitFromName(action.getTargetUnitName());
+        if (target == null || !target.isExists()) {
+            LogError("DMAddWeaponAction failed: unit '" + action.getTargetUnitName() + "' not found.\n");
+            return;
+        }
+        if (!(target.getUnit() instanceof Evangelion eva)) {
+            LogError("DMAddWeaponAction failed: '" + target.getName() + "' is not an Evangelion.\n");
+            return;
+        }
+        List<Slot> slots = eva.getSlots();
+        int slotNum = action.getSlotNumber();
+        if (slotNum < 0 || slotNum >= slots.size()) {
+            LogError("DMAddWeaponAction failed: slot " + slotNum + " out of range (0-" + (slots.size() - 1) + ").\n");
+            return;
+        }
+        Slot slot = slots.get(slotNum);
+        if (slot.getItem() != null) {
+            LogError("DMAddWeaponAction failed: slot " + slot.getName() + " of " + target.getName() + " is occupied.\n");
+            return;
+        }
+        if (!slot.canFit(weapon)) {
+            LogError("DMAddWeaponAction failed: '" + weapon.getName() + "' does not fit slot " + slot.getName() + ".\n");
+            return;
+        }
+        slot.setItem(weapon);
+        LogMessage("DMAddWeaponAction: '" + weapon.getName() + "' -> " + target.getName()
+                + " slot " + slot.getName() + " (#" + slotNum + ").");
+    }
+
+    private void processDMAddEffectAction(DMAddEffectAction action) {
+        DMQueueInsertion(action, "DM_ADD_EFFECT");
+
+        FieldUnit target = getUnitFromName(action.getTargetUnitName());
+        if (target == null || !target.isExists()) {
+            LogError("DMAddEffectAction failed: unit '" + action.getTargetUnitName() + "' not found.\n");
+            return;
+        }
+        Effect effect = action.getEffect();
+        if (effect == null) {
+            LogError("DMAddEffectAction failed: action carries no effect.\n");
+            return;
+        }
+        int before = target.getCurrentEffects().size();
+        target.addEffect(effect.copy());
+        if (target.getCurrentEffects().size() > before) {
+            LogMessage("DMAddEffectAction: " + target.getName() + " gains " + EffectEditor.describe(effect));
+        } else {
+            LogMessage("DMAddEffectAction: " + target.getName() + " already has non-stacking '" + effect.getName() + "'.");
+        }
+    }
+
+
     private Weapon loadWeaponByName(String name) {
         if (name == null || name.isBlank()) return null;
 
@@ -3413,6 +3456,8 @@ public class Game {
             case "livegame":   output.appendText(cmdLiveGame());        break;
             case "replacegame":output.appendText(cmdReplaceGame(parts));break;
             case "revert":     output.appendText(cmdRevert(parts));     break;
+            case "addweapon":  output.appendText(cmdAddWeapon(parts));  break;
+            case "addeffect":  output.appendText(cmdAddEffect(parts));  break;
             case "create":
                 if (parts.length < 4) {
                     output.appendText("Error: Usage: create <name> <x> <y> [team]\n");
@@ -3455,80 +3500,6 @@ public class Game {
                 SendAction(createAction);
                 output.appendText("Sent DMCreateUnitAction for '" + name + "' at ("
                         + x + ", " + y + ") team=" + team + ".\n");
-                break;
-            case "giveweapon":
-                // Form 1: giveWeapon <slotNum> <weaponName>               → current player's unit
-                // Form 2: giveWeapon <unitName> <slotNum> <weaponName>    → named unit
-                if (parts.length < 3) {
-                    output.appendText("Error: Usage: giveWeapon <slotNum> <weaponName>\n");
-                    output.appendText("       giveWeapon <unitName> <slotNum> <weaponName>\n");
-                    output.appendText("Available weapons: " + String.join(", ",
-                            listAvailableWeaponFiles()) + "\n");
-                    return;
-                }
-
-                String gwUnitName;
-                int    gwSlotNum;
-                String gwWeaponName;
-
-                if (parts.length == 3) {
-                    gwUnitName = currentPlayer;
-                    try {
-                        gwSlotNum = Integer.parseInt(parts[1]);
-                    } catch (NumberFormatException ex) {
-                        output.appendText("Error: slot number must be an integer.\n");
-                        return;
-                    }
-                    gwWeaponName = parts[2];
-                } else {
-                    gwUnitName = parts[1];
-                    try {
-                        gwSlotNum = Integer.parseInt(parts[2]);
-                    } catch (NumberFormatException ex) {
-                        output.appendText("Error: slot number must be an integer.\n");
-                        return;
-                    }
-                    StringBuilder wn = new StringBuilder();
-                    for (int j = 3; j < parts.length; j++) {
-                        if (j > 3) wn.append(" ");
-                        wn.append(parts[j]);
-                    }
-                    gwWeaponName = wn.toString();
-                }
-
-                if (gwWeaponName == null || gwWeaponName.isBlank()) {
-                    output.appendText("Error: weapon name cannot be empty.\n");
-                    return;
-                }
-
-                // ---- DM-side validation against the live world ----
-                FieldUnit gwTarget = getUnitFromName(gwUnitName);
-                if (gwTarget == null || !(gwTarget.getUnit() instanceof Evangelion)) {
-                    output.appendText("Error: no Evangelion named '" + gwUnitName + "'.\n");
-                    return;
-                }
-                int slotCount = ((Evangelion) gwTarget.getUnit()).getSlots().size();
-                if (gwSlotNum < 0 || gwSlotNum >= slotCount) {
-                    output.appendText("Error: slot " + gwSlotNum
-                            + " out of range (0-" + (slotCount - 1) + ").\n");
-                    return;
-                }
-
-                // ---- DM-side disk load; the object rides inside the action ----
-                Weapon gwWeapon = loadWeaponByName(gwWeaponName);
-                if (gwWeapon == null) {
-                    output.appendText("Error: could not load weapon '" + gwWeaponName
-                            + "' from Active/weapons/.\n");
-                    output.appendText("Available: " + String.join(", ",
-                            listAvailableWeaponFiles()) + "\n");
-                    return;
-                }
-
-                DMGiveWeaponAction gwAction = new DMGiveWeaponAction(
-                        currentActionNumber+1, "DM", gwUnitName, gwSlotNum, gwWeapon);
-                SendAction(gwAction);
-                output.appendText("Sent DMGiveWeaponAction: '" + gwWeapon.getName()
-                        + "' → " + gwUnitName + " slot #" + gwSlotNum + ".\n");
                 break;
             case "round":
                 EndRoundAction action1 = new EndRoundAction(
@@ -3665,7 +3636,6 @@ public class Game {
             case "weapons":
                 // List every weapon file in Active/weapons/, together with a
                 // short summary of its key stats so the DM can pick one to
-                // give out via the giveWeapon command.
                 output.appendText("Saved weapons in Active/weapons/:\n");
                 File wdir = new File("Active/weapons");
                 if (!wdir.isDirectory()) {
@@ -3719,8 +3689,6 @@ public class Game {
                 output.appendText("  team <name> <teamNumber> – switches a unit to another team\n");
                 output.appendText("  showAllUnits          – toggle showing finished units in the next-turn list\n");
                 output.appendText("  round                  – Ends the round forcefully\n");
-                output.appendText("  giveWeapon <slot> <weapon>            – replace current player's slot with a saved weapon\n");
-                output.appendText("  giveWeapon <unit> <slot> <weapon>     – same, but for a named unit\n");
                 output.appendText("  weapons                – list all saved weapons in Active/weapons/\n");
                 output.appendText("  savegame <name> [overwrite]   – saves the current game to the saved folder\n");
                 output.appendText("  saves                         – lists saved games\n");
@@ -3728,6 +3696,9 @@ public class Game {
                 output.appendText("  livegame                      – returns you to the shared activegame\n");
                 output.appendText("  replacegame <name> confirm    – REPLACES activegame with a save; every client restarts\n");
                 output.appendText("  revert <actionNumber> confirm – deletes all actions after that number, loads result into activegame\n");
+                output.appendText("  addWeapon field <x> <y> <weapon>          – spawns a saved weapon on the field (sector must have no item)\n");
+                output.appendText("  addWeapon slot <unit> <slot> <weapon>     – puts a saved weapon into an EMPTY slot\n");
+                output.appendText("  addEffect <unit>       – applies the effect set in the DM screen's Effect Builder\n");
                 break;
 
             default:
@@ -4677,6 +4648,33 @@ public class Game {
 
         consoleSplit.getChildren().addAll(leftConsole, rightConsole);
         wrapper.getChildren().add(consoleSplit);
+
+        // ---- Effect builder (collapsed by default) ----
+        dmEffectEditor = new EffectEditor(null);
+        dmEffectTargetCombo = new ComboBox<>();
+        dmEffectTargetCombo.setPromptText("Target unit");
+        dmEffectTargetCombo.setPrefWidth(200);
+        BetterButton applyEffectBtn = new BetterButton("Apply Effect to Unit");
+        applyEffectBtn.setPrimaryStyle();
+        applyEffectBtn.setOnAction(e -> {
+            String targetName = dmEffectTargetCombo.getValue();
+            if (targetName == null) {
+                dmConsoleOutput.appendText("Choose a target unit first.\n");
+                return;
+            }
+            dmConsoleOutput.appendText(sendAddEffect(targetName));
+        });
+        HBox effectApplyRow = new HBox(10, new Label("Target:"), dmEffectTargetCombo, applyEffectBtn);
+        effectApplyRow.setAlignment(Pos.CENTER_LEFT);
+        VBox effectBox = new VBox(8, dmEffectEditor, effectApplyRow);
+        effectBox.setPadding(new Insets(8));
+        ScrollPane effectScroll = new ScrollPane(effectBox);
+        effectScroll.setFitToWidth(true);
+        effectScroll.setPrefHeight(260);
+        TitledPane effectPane = new TitledPane("Effect Builder", effectScroll);
+        effectPane.setExpanded(false);
+        wrapper.getChildren().add(effectPane);
+        refreshEffectTargets();
 
         // ---- Set Current Player button (below the split) ----
         BetterButton setCurrentBtn = new BetterButton("Set as Current Player");
@@ -7229,6 +7227,82 @@ public class Game {
         } catch (IOException e) {
             return "Replace failed: " + e.getMessage() + "\n";
         }
+    }
+    private static String joinFrom(String[] parts, int from) {
+        return String.join(" ", Arrays.copyOfRange(parts, from, parts.length));
+    }
+
+    private String cmdAddWeapon(String[] parts) {
+        String usage = "Usage: addWeapon field <x> <y> <weaponName>\n"
+                + "       addWeapon slot <unitName> <slotNum> <weaponName>\n"
+                + "Available weapons: " + String.join(", ", listAvailableWeaponFiles()) + "\n";
+        if (parts.length < 5) return usage;
+        String mode = parts[1].toLowerCase();
+
+        if (mode.equals("field")) {
+            Integer x = parseIntOrNull(parts[2]);
+            Integer y = parseIntOrNull(parts[3]);
+            if (x == null || y == null) return "Error: x and y must be integers.\n";
+            if (!isOnBoard(x, y)) return "Error: coordinates out of bounds.\n";
+            if (getFieldItemAt(x, y) != null) return "Error: there is already an item at " + CordsToText(x, y) + ".\n";
+            String weaponName = joinFrom(parts, 4);
+            Weapon w = loadWeaponByName(weaponName);
+            if (w == null) return "Error: could not load weapon '" + weaponName + "' from Active/weapons/.\n" + usage;
+            SendAction(DMAddWeaponAction.toField(currentActionNumber + 1, "DM", w, x, y));
+            return "Sent DMAddWeaponAction: '" + w.getName() + "' -> field " + CordsToText(x, y) + ".\n";
+        }
+
+        if (mode.equals("slot")) {
+            String unitName = parts[2];
+            Integer slotNum = parseIntOrNull(parts[3]);
+            if (slotNum == null) return "Error: slot number must be an integer.\n";
+            FieldUnit target = findUnitSilent(unitName);
+            if (target == null || !target.isExists() || !(target.getUnit() instanceof Evangelion eva)) {
+                return "Error: no Evangelion named '" + unitName + "'.\n";
+            }
+            List<Slot> slots = eva.getSlots();
+            if (slotNum < 0 || slotNum >= slots.size()) {
+                return "Error: slot " + slotNum + " out of range (0-" + (slots.size() - 1) + ").\n";
+            }
+            if (slots.get(slotNum).getItem() != null) {
+                return "Error: slot " + slotNum + " is occupied.\n";
+            }
+            String weaponName = joinFrom(parts, 4);
+            Weapon w = loadWeaponByName(weaponName);
+            if (w == null) return "Error: could not load weapon '" + weaponName + "' from Active/weapons/.\n" + usage;
+            if (!slots.get(slotNum).canFit(w)) return "Error: '" + w.getName() + "' does not fit that slot.\n";
+            SendAction(DMAddWeaponAction.toSlot(currentActionNumber + 1, "DM", w, unitName, slotNum));
+            return "Sent DMAddWeaponAction: '" + w.getName() + "' -> " + unitName + " slot #" + slotNum + ".\n";
+        }
+        return usage;
+    }
+
+    /** addEffect <unitName>: applies the effect currently set in the DM screen's Effect Builder. */
+    private String cmdAddEffect(String[] parts) {
+        if (parts.length < 2) return "Usage: addEffect <unitName>   (uses the effect set in the Effect Builder)\n";
+        return sendAddEffect(joinFrom(parts, 1).trim());
+    }
+
+    private String sendAddEffect(String unitName) {
+        FieldUnit target = findUnitSilent(unitName);
+        if (target == null || !target.isExists()) return "Error: no unit named '" + unitName + "'.\n";
+        Effect effect;
+        try {
+            effect = dmEffectEditor.toEffect();
+        } catch (IllegalArgumentException ex) {
+            return "Error: " + ex.getMessage() + "\n";
+        }
+        SendAction(new DMAddEffectAction(currentActionNumber + 1, "DM", unitName, effect));
+        return "Sent DMAddEffectAction: " + EffectEditor.describe(effect) + " -> " + unitName + ".\n";
+    }
+
+    private void refreshEffectTargets() {
+        if (dmEffectTargetCombo == null) return;
+        String selected = dmEffectTargetCombo.getValue();
+        List<String> names = new ArrayList<>();
+        for (FieldUnit u : UnitList) if (u.isExists()) names.add(u.getName());
+        dmEffectTargetCombo.getItems().setAll(names);
+        if (selected != null && names.contains(selected)) dmEffectTargetCombo.setValue(selected);
     }
 
     private String cmdRevert(String[] parts) {

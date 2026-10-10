@@ -27,6 +27,10 @@ public class AttackProfile implements Serializable {
     public int MinRange = 0;   // minimum distance (sectors) for a normal hit
     public int MaxRange = 1;   // maximum distance (sectors) for a normal hit
     public String name;
+    public boolean countsAsAttack = true;
+    // True = this counts as attack, only one attack can be used per turn
+    // False = this doesnt actually count as an "attack" and can be used once per turn without conting towards attack limit
+
     public boolean Ranged;
     public boolean isRanged() {
         return Ranged;
@@ -121,7 +125,9 @@ public class AttackProfile implements Serializable {
         c.overheated = this.overheated;
         c.multihit        = this.multihit;
         c.strengthApplied = this.strengthApplied;
-        c.onHitEffects = new ArrayList<>(this.onHitEffects);
+        c.countsAsAttack = this.countsAsAttack;
+        c.onHitEffects = new ArrayList<>();
+        for (Effect e : this.onHitEffects) c.onHitEffects.add(e.copy());
         c.AttackProperties = new ArrayList<>(this.AttackProperties);
         return c;
     }
@@ -224,7 +230,8 @@ public class AttackProfile implements Serializable {
                 profile = new AttackProfile("Basic Attack", 2, 6, 2, ProfileTypes.BASIC, true); profile.AmmoCost = 1;
                 break;
             default:
-                // Unrecognized weapon type – return null or handle gracefully
+                // Custom weapon type: read the basic profile saved by the Weapon Type screen
+                profile = CustomContentStore.loadTypeBasicProfile(w.getProfileType());
                 break;
         }
 

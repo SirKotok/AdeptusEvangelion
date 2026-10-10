@@ -2,8 +2,10 @@ package eva.evangelion.view;
 
 import eva.evangelion.items.Weapon.*;
 import eva.evangelion.view.UIElements.BetterButton;
+import eva.evangelion.view.UIElements.FormKit;
 import eva.evangelion.view.UIElements.ScrollableContainer;
 import javafx.geometry.Insets;
+import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.image.Image;
@@ -116,11 +118,72 @@ public class WeaponCreatorUI extends Pane {
         }
     }
 
+    /** What the UI works with: a built-in enum entry or a custom type loaded from disk. */
+    private static final class TypeDef {
+        final String displayName;
+        final boolean ranged;
+        final Weapon.Hand hands;
+        final int baseCost;
+        final String damage;
+        final int ammo;
+        final int minRange;
+        final int maxRange;
+        final int powerBonus;
+        final int basePenetration;
+        final int baseArea;
+        final List<Weapon.WeaponProperty> baseProperties;
+        final boolean custom;
+
+        TypeDef(String displayName, boolean ranged, Weapon.Hand hands, int baseCost, String damage,
+                int ammo, int minRange, int maxRange, int powerBonus, int basePenetration,
+                int baseArea, List<Weapon.WeaponProperty> baseProperties, boolean custom) {
+            this.displayName = displayName;
+            this.ranged = ranged;
+            this.hands = hands;
+            this.baseCost = baseCost;
+            this.damage = damage;
+            this.ammo = ammo;
+            this.minRange = minRange;
+            this.maxRange = maxRange;
+            this.powerBonus = powerBonus;
+            this.basePenetration = basePenetration;
+            this.baseArea = baseArea;
+            this.baseProperties = baseProperties;
+            this.custom = custom;
+        }
+
+        static TypeDef of(BaseWeaponType t) {
+            return new TypeDef(t.displayName, t.ranged, t.hands, t.baseCost, t.damage, t.ammo, t.minRange,
+                    t.maxRange, t.powerBonus, t.basePenetration, t.baseArea, t.baseProperties, false);
+        }
+
+        static TypeDef of(CustomWeaponType t) {
+            return new TypeDef(t.displayName, t.ranged, t.hands, t.baseCost, t.dice + "d" + t.dicePower,
+                    t.ammo, t.minRange, t.maxRange, t.power, t.basePenetration, t.baseArea,
+                    new ArrayList<>(t.baseProperties), true);
+        }
+
+        @Override public boolean equals(Object o) {
+            return o instanceof TypeDef other && other.displayName.equals(displayName);
+        }
+        @Override public int hashCode() { return displayName.hashCode(); }
+        @Override public String toString() { return custom ? displayName + " (custom)" : displayName; }
+    }
+
+    private static final TypeDef DEFAULT_TYPE = TypeDef.of(BaseWeaponType.KNIFE);
+
     // ---- UI Components ----
     private TextField nameField;
-    private ComboBox<BaseWeaponType> meleeTypeCombo;
-    private ComboBox<BaseWeaponType> rangedTypeCombo;
-    private BaseWeaponType currentType;
+    private ComboBox<TypeDef> meleeTypeCombo;
+    private ComboBox<TypeDef> rangedTypeCombo;
+    private TypeDef currentType;
+
+    private final boolean customCreatorsEnabled;
+    private final Pane weaponScreen = new Pane();          // the original screen
+    private final StackPane screenStack = new StackPane(); // holds all screens
+    private WeaponTypeCreatorScreen typeScreen;
+    private SpecialWeaponCreatorScreen specialScreen;
+    private AttackProfileCreatorUI profileScreen;
     private Label descriptionLabel;
     private ComboBox<Weapon.Tech> techCombo;
     private ComboBox<Weapon.Tech> secondTechCombo;
@@ -144,7 +207,11 @@ public class WeaponCreatorUI extends Pane {
     private ScrollableContainer actionContainer;
 
     // ---- Constructor ----
-    public WeaponCreatorUI() {
+    public WeaponCreatorUI() { this(false); }
+
+    /** @param enableCustomCreators true to show the Weapon Type / Special Weapon / Attack Profile screens */
+    public WeaponCreatorUI(boolean enableCustomCreators) {
+        this.customCreatorsEnabled = enableCustomCreators;
         setPrefSize(900, 800);
         setStyle("-fx-background-color: #f4f4f4;");
 
@@ -196,25 +263,18 @@ public class WeaponCreatorUI extends Pane {
         // ---- Weapon Type Selection ----
         Label meleeLabel = new Label("Melee Weapon:");
         meleeTypeCombo = new ComboBox<>();
-        meleeTypeCombo.getItems().addAll(
-                Arrays.stream(BaseWeaponType.values())
-                        .filter(t -> !t.ranged)
-                        .collect(Collectors.toList())
-        );
+        List<TypeDef> allTypes = allTypes();
+        meleeTypeCombo.getItems().addAll(allTypes.stream().filter(t -> !t.ranged).collect(Collectors.toList()));
         meleeTypeCombo.setPrefWidth(200);
-        meleeTypeCombo.setValue(BaseWeaponType.KNIFE);
+        meleeTypeCombo.setValue(DEFAULT_TYPE);
 
         Label rangedLabel = new Label("Ranged Weapon:");
         rangedTypeCombo = new ComboBox<>();
-        rangedTypeCombo.getItems().addAll(
-                Arrays.stream(BaseWeaponType.values())
-                        .filter(t -> t.ranged)
-                        .collect(Collectors.toList())
-        );
+        rangedTypeCombo.getItems().addAll(allTypes.stream().filter(t -> t.ranged).collect(Collectors.toList()));
         rangedTypeCombo.setPrefWidth(200);
         rangedTypeCombo.setValue(null);
 
-        currentType = BaseWeaponType.KNIFE;
+        currentType = DEFAULT_TYPE;
 
         meleeTypeCombo.valueProperty().addListener((obs, oldVal, newVal) -> {
             if (newVal != null) {
@@ -317,7 +377,7 @@ public class WeaponCreatorUI extends Pane {
         // ---- Action Buttons ----
         BetterButton saveBtn = new BetterButton("Save Weapon");
         saveBtn.setSuccessStyle();
-        saveBtn.setOnAction(e -> showSaveDialog());
+        saveBtn.setOnAction(e -> showSaveDialog(currentWeapon));
 
         BetterButton clearBtn = new BetterButton("Clear");
         clearBtn.setDangerStyle();
@@ -381,7 +441,7 @@ public class WeaponCreatorUI extends Pane {
         iconScrollContainer.addNode(iconTilePane);
 
         // ---- Add containers to main pane ----
-        getChildren().addAll(
+        weaponScreen.getChildren().addAll(
                 inputContainer,
                 customContainer,
                 actionContainer,
@@ -406,10 +466,11 @@ public class WeaponCreatorUI extends Pane {
         updateCustomisationAvailability();
         updateStats();
         updateDescription("");
+        buildRoot();
     }
 
-    private void showSaveDialog() {
-        if (currentWeapon == null) {
+    private void showSaveDialog(Weapon weapon) {
+        if (weapon == null) {
             Alert alert = new Alert(Alert.AlertType.WARNING);
             alert.setContentText("No weapon to save.");
             alert.showAndWait();
@@ -424,7 +485,7 @@ public class WeaponCreatorUI extends Pane {
 
         // Create content: label + text field
         Label nameLabel = new Label("Weapon Name:");
-        TextField nameField = new TextField(currentWeapon.getName());
+        TextField nameField = new TextField(weapon.getName());
         nameField.setPrefWidth(250);
 
         Label fileStatusLabel = new Label();
@@ -473,10 +534,91 @@ public class WeaponCreatorUI extends Pane {
 
             String newName = nameField.getText().trim();
             if (!newName.isEmpty()) {
-                currentWeapon.setName(newName);
+                weapon.setName(newName);
             }
-            saveWeapon();
+            saveWeapon(weapon);
         }
+    }
+
+    private List<TypeDef> allTypes() {
+        List<TypeDef> list = new ArrayList<>();
+        for (BaseWeaponType t : BaseWeaponType.values()) list.add(TypeDef.of(t));
+        for (CustomWeaponType t : CustomContentStore.loadAllWeaponTypes()) list.add(TypeDef.of(t));
+        return list;
+    }
+
+    private static List<String> reservedTypeNames() {
+        return Arrays.stream(BaseWeaponType.values()).map(t -> t.displayName).collect(Collectors.toList());
+    }
+
+    /** Reloads the type dropdowns after the Weapon Type screen saved something. */
+    private void refreshTypeCombos() {
+        List<TypeDef> all = allTypes();
+        TypeDef previous = currentType;
+        meleeTypeCombo.getItems().setAll(all.stream().filter(t -> !t.ranged).collect(Collectors.toList()));
+        rangedTypeCombo.getItems().setAll(all.stream().filter(t -> t.ranged).collect(Collectors.toList()));
+        TypeDef fresh = all.stream().filter(t -> t.equals(previous)).findFirst().orElse(DEFAULT_TYPE);
+        currentType = fresh;
+        if (fresh.ranged) {
+            rangedTypeCombo.setValue(fresh);
+            meleeTypeCombo.setValue(null);
+        } else {
+            meleeTypeCombo.setValue(fresh);
+            rangedTypeCombo.setValue(null);
+        }
+        updateCustomisationAvailability();
+        updateStats();
+    }
+
+    private void buildRoot() {
+        BorderPane root = new BorderPane();
+        root.prefWidthProperty().bind(widthProperty());
+        root.prefHeightProperty().bind(heightProperty());
+
+        screenStack.getChildren().add(weaponScreen);
+        if (customCreatorsEnabled) {
+            typeScreen = new WeaponTypeCreatorScreen(reservedTypeNames(), this::refreshTypeCombos);
+            specialScreen = new SpecialWeaponCreatorScreen(this::showSaveDialog);
+            profileScreen = new AttackProfileCreatorUI();
+            screenStack.getChildren().addAll(typeScreen, specialScreen, profileScreen);
+            root.setTop(buildModeBar());
+            showScreen(weaponScreen);
+        }
+        root.setCenter(screenStack);
+        getChildren().add(root);
+    }
+
+    private HBox buildModeBar() {
+        ToggleGroup group = new ToggleGroup();
+        HBox bar = new HBox(8);
+        bar.setPadding(new Insets(6, 10, 6, 10));
+        bar.setStyle("-fx-background-color: #2c3e50;");
+        addModeButton(bar, group, "Weapon", weaponScreen, true);
+        addModeButton(bar, group, "Weapon Type", typeScreen, false);
+        addModeButton(bar, group, "Special Weapon", specialScreen, false);
+        addModeButton(bar, group, "Attack Profile", profileScreen, false);
+        // clicking the active tab must not leave the bar with nothing selected
+        group.selectedToggleProperty().addListener((o, old, now) -> {
+            if (now == null && old != null) old.setSelected(true);
+        });
+        return bar;
+    }
+
+    private void addModeButton(HBox bar, ToggleGroup group, String text, Node screen, boolean selected) {
+        ToggleButton b = new ToggleButton(text);
+        b.setToggleGroup(group);
+        b.setSelected(selected);
+        b.setOnAction(e -> showScreen(screen));
+        bar.getChildren().add(b);
+    }
+
+    private void showScreen(Node active) {
+        for (Node n : screenStack.getChildren()) {
+            boolean on = n == active;
+            n.setVisible(on);
+            n.setManaged(on);
+        }
+        if (active == specialScreen) specialScreen.refreshProfiles();   // pick up newly saved profiles
     }
 
     // ---- Helper Methods ----
@@ -595,14 +737,7 @@ public class WeaponCreatorUI extends Pane {
         }
     }
     private ScrollableContainer createContainer(double left, double width, double top, double height) {
-        ScrollableContainer container = new ScrollableContainer(left, width, top, height);
-        container.setFitToHeight(true);
-        container.setContainerPadding(new Insets(10));
-        container.setSpacing(5);
-        container.setBackgroundColor(Color.rgb(255, 255, 255, 0.95));
-        container.setBorderStyle("-fx-border-color: #2c3e50; -fx-border-width: 2; -fx-border-radius: 8;");
-        container.setStyle("-fx-text-fill: black;");
-        return container;
+        return FormKit.panel(weaponScreen, left, width, top, height);
     }
 
     private void addIcon(String iconName) {
@@ -695,7 +830,7 @@ public class WeaponCreatorUI extends Pane {
         w.setBaseArea(currentType.baseArea);
         w.setDisplayIcon(selectedIcon);
         // ---- Range ----
-        if (currentType.ranged) {
+        if (currentType.ranged || currentType.custom) {
             w.setMinRange(currentType.minRange);
             w.setMaxRange(Math.max(1, currentType.maxRange));
         } else {
@@ -725,7 +860,7 @@ public class WeaponCreatorUI extends Pane {
                     default -> {
                         w.Customisations.add(c);
                         switch (c) {
-                          //  case ANTI_ARMOR -> w.setBasePenetration(w.getBasePenetration() + 1);
+                            //  case ANTI_ARMOR -> w.setBasePenetration(w.getBasePenetration() + 1);
                             case BALANCED -> w.setDefensive(10);
                             case EXTRA_AMMO -> {
                                 if (w.isRanged()) {
@@ -777,7 +912,7 @@ public class WeaponCreatorUI extends Pane {
             if (currentWeapon.Technology.size() > 1) {
                 stats.append("\n");
                 if (currentWeapon.Customisations.contains(Weapon.Customisation.ENHANCED_BAYONET)) {
-                stats.append("(Knife: ").append(currentWeapon.Technology.get(1)).append(")");
+                    stats.append("(Knife: ").append(currentWeapon.Technology.get(1)).append(")");
                 } else {
                     stats.append("(Secondary: ").append(currentWeapon.Technology.get(1)).append(")");
                 }
@@ -841,8 +976,8 @@ public class WeaponCreatorUI extends Pane {
         return "N/A";
     }
 
-    private void saveWeapon() {
-        if (currentWeapon == null) {
+    private void saveWeapon(Weapon weapon) {
+        if (weapon == null) {
             Alert alert = new Alert(Alert.AlertType.WARNING);
             alert.setContentText("No weapon to save.");
             alert.showAndWait();
@@ -850,10 +985,10 @@ public class WeaponCreatorUI extends Pane {
         }
         File dir = new File("Active/weapons");
         if (!dir.exists()) dir.mkdirs();
-        String fileName = currentWeapon.getName().replaceAll("[^a-zA-Z0-9]", "_") + ".ser";
+        String fileName = weapon.getName().replaceAll("[^a-zA-Z0-9]", "_") + ".ser";
         File file = new File(dir, fileName);
         try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(file))) {
-            oos.writeObject(currentWeapon);
+            oos.writeObject(weapon);
             Alert alert = new Alert(Alert.AlertType.INFORMATION);
             alert.setContentText("Weapon saved to " + file.getPath());
             alert.showAndWait();
@@ -866,9 +1001,9 @@ public class WeaponCreatorUI extends Pane {
 
     private void clearAll() {
         nameField.setText("My Weapon");
-        meleeTypeCombo.setValue(BaseWeaponType.KNIFE);
+        meleeTypeCombo.setValue(DEFAULT_TYPE);
         rangedTypeCombo.setValue(null);
-        currentType = BaseWeaponType.KNIFE;
+        currentType = DEFAULT_TYPE;
         techCombo.setValue(techCombo.getItems().get(0));
         secondTechCombo.setValue(null);
         for (CheckBox cb : customCheckBoxes.values()) {
@@ -888,12 +1023,13 @@ public class WeaponCreatorUI extends Pane {
         updateDescription("Weapon Cleared");
     }
 
-    public static void launchStandalone() {
+    public static void launchStandalone() { launchStandalone(false); }
+
+    public static void launchStandalone(boolean enableCustomCreators) {
         Stage stage = new Stage();
         stage.setTitle("Weapon Creator");
-        WeaponCreatorUI ui = new WeaponCreatorUI();
-        Scene scene = new Scene(ui, 900, 800);
-        stage.setScene(scene);
+        WeaponCreatorUI ui = new WeaponCreatorUI(enableCustomCreators);
+        stage.setScene(new Scene(ui, 900, 800));
         stage.show();
     }
 }
